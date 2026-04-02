@@ -1,7 +1,7 @@
 # ROADMAP — btc-bot-v2 Development Plan
 
 > Documento vivente. Aggiornato step-by-step ad ogni sessione.
-> Ultimo aggiornamento: **2026-03-31**
+> Ultimo aggiornamento: **2026-04-02**
 
 ---
 
@@ -20,6 +20,13 @@
 | 8 | Security Hardening | **DONE** | 0 | CORS, rate limit, CSP, audit, key rotation |
 | 9 | Strategy Evaluation | **DONE** | 29 | Evaluator + comparison + report + API + CSV |
 | 10 | Optimization & Polish | **DONE** | 40 | Refactor, E2E, stress, load, OpenAPI |
+| 11 | Paper Validation & Alerting | TODO | 0 | Regime detection, Telegram alerts, equity tracking |
+| 12 | Strategy Intelligence | TODO | 0 | Adaptive thresholds, multi-TF, regime-based selection |
+| 13 | Live Trading Path | TODO | 0 | CLOB execution, wallet, kill switch, dual mode |
+| 14 | Resilienza & Recovery | TODO | 0 | HTTP pool, retry decorator, graceful degradation |
+| 15 | Dashboard v2 | TODO | 0 | Equity chart, strategy toggle, mobile, log viewer |
+| 16 | Data Pipeline & Analytics | TODO | 0 | TimescaleDB, historical ingest, feature store |
+| 17 | Infrastructure Hardening | TODO | 0 | SSL, Grafana, CI/CD, secrets management |
 
 **Totale test: 478 passing (18.55s)**
 
@@ -303,6 +310,376 @@ SPA React con dati real-time via WebSocket + REST polling fallback.
 
 ---
 
+---
+
+# ═══════════════════════════════════════════════════════════════
+# V3 ROADMAP — Fasi 11-17 (2026-04-02 →)
+# ═══════════════════════════════════════════════════════════════
+
+## Priorità di esecuzione
+
+```
+IMMEDIATA  (Settimana 1)     → Fase 11: Paper validation, regime detection, alerting Telegram
+BREVE      (Settimana 2-3)   → Fase 12: Strategy intelligence, adaptive thresholds
+MEDIA      (Settimana 4-5)   → Fase 14: Resilienza, connection pooling, retry logic
+CRITICA    (Settimana 6-7)   → Fase 13: Live trading path (solo dopo paper validation OK)
+ONGOING    (Settimana 8+)    → Fasi 15-17: Dashboard v2, data pipeline, infra hardening
+```
+
+### Criteri Go-Live (gate obbligatorio prima di Fase 13)
+- [ ] Paper trading attivo ≥14 giorni consecutivi
+- [ ] Win rate aggregato >55%
+- [ ] Sharpe ratio >1.0 su dati reali (non sintetici)
+- [ ] Max drawdown <15% su qualsiasi strategia
+- [ ] Zero circuit breaker triggers in ultimi 7 giorni
+- [ ] Alerting Telegram funzionante e testato
+
+---
+
+## Phase 11: Paper Trading Validation & Alerting — TODO
+
+> **Obiettivo:** Validare le strategie su dati reali di mercato e ricevere notifiche in tempo reale.
+> **Motivazione:** Il bot gira con `regime="UNKNOWN"` hardcoded, nessun alerting, nessuna equity curve reale.
+> **Criticità trovate nel codice:**
+>   - `main.py:122` → `regime="UNKNOWN"` sempre
+>   - Nessun sistema di notifica (se il bot crasha di notte, nessuno lo sa)
+>   - Equity curve solo da backtest sintetici (GBM), mai da trading reale
+
+### 11.1 — Regime Detection (market classifier)
+- [ ] Creare `src/bot/strategies/regime.py` — classificatore ADX + BB width + EMA slope
+- [ ] 3 regimi: `TRENDING` (ADX>25, EMA slope forte), `RANGING` (ADX<20, BB stretta), `VOLATILE` (BB larga, ADX medio)
+- [ ] Integrare in `main.py` → passare regime reale a `db.save_signal_state()` (sostituire "UNKNOWN")
+- [ ] Salvare regime in `regime_history` (tabella già esistente, mai popolata)
+- [ ] Test: almeno 15 test per regime classifier
+
+### 11.2 — Equity Curve Tracking
+- [ ] Nuova tabella `equity_snapshots` (timestamp, strategy, asset, bankroll, total_pnl, open_trades)
+- [ ] Task periodico ogni 5min che salva snapshot bankroll per ogni bot
+- [ ] API endpoint `GET /api/v2/equity?strategy=X&days=7` → serie temporale
+- [ ] Migrare sia SQLite che PostgreSQL schema
+
+### 11.3 — Trade Journaling migliorato
+- [ ] Al momento del trade, salvare snapshot completo indicatori (RSI, BB%, funding, OI, L/S ratio, regime)
+- [ ] Nuova colonna `indicators_json` in tabella `trades` (JSON blob)
+- [ ] API endpoint `GET /api/v2/trades/:id/indicators` per post-mortem
+
+### 11.4 — Telegram Alerting
+- [ ] `src/bot/notifications/telegram.py` — client async (httpx → Telegram Bot API)
+- [ ] Config: `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` in `.env`
+- [ ] Eventi notificati:
+  - Trade piazzato (strategy, asset, signal, size, confidence)
+  - Trade risolto (outcome, P&L, bankroll aggiornato)
+  - Circuit breaker triggered
+  - Drawdown alert (>10%, >15%, >20%)
+  - Daily P&L summary (cron 23:59 UTC)
+  - Bot startup/shutdown
+  - Feed disconnection >60s
+- [ ] Rate limiting: max 30 messaggi/minuto per evitare ban Telegram
+- [ ] Formattazione Markdown con emoji per leggibilità mobile
+- [ ] Test: mock Telegram API, verificare formatting, rate limiter
+
+### 11.5 — Daily/Weekly Report
+- [ ] Report automatico giornaliero con:
+  - P&L per strategia/asset
+  - Win rate rolling 24h
+  - Best/worst trade
+  - Regime distribution (% tempo in trending/ranging/volatile)
+  - Equity curve mini-chart (ASCII o immagine)
+- [ ] Inviato via Telegram alle 00:00 UTC
+- [ ] Report settimanale con trend e confronto settimana precedente
+
+### Test target: ~50 nuovi test
+
+---
+
+## Phase 12: Strategy Intelligence — TODO
+
+> **Obiettivo:** Strategie che si adattano al mercato invece di threshold fissi.
+> **Motivazione:** `cvd_threshold=1_000_000` e fisso — in mercati calmi non genera segnali, in mercati volatili genera troppi.
+
+### 12.1 — Adaptive Thresholds
+- [ ] `src/bot/strategies/adaptive.py` — rolling percentile calculator
+- [ ] CVD threshold = P75 del rolling 1h di CVD assoluto (invece di valore fisso)
+- [ ] VWAP threshold = P75 del rolling 1h di VWAP change
+- [ ] Config: `adaptive_enabled=True`, `adaptive_window=3600`, `adaptive_percentile=75`
+- [ ] Fallback a threshold fissi se non abbastanza dati (<100 campioni)
+
+### 12.2 — Multi-Timeframe Confirmation
+- [ ] Aggiungere 5min e 15min trend come filtro sovrapposto
+- [ ] `RSIFeed` esteso con periodi multipli (attualmente solo 1min candles)
+- [ ] Segnale confermato solo se trend 2min E trend 5min concordano
+- [ ] Config toggle: `multi_tf_enabled=True`
+
+### 12.3 — Regime-Based Strategy Selection
+- [ ] Usare regime da Fase 11.1 per abilitare/disabilitare strategie automaticamente:
+  - `TRENDING` → Momentum ON, Bollinger OFF
+  - `RANGING` → Bollinger ON, Turbo ridotto
+  - `VOLATILE` → Turbo ON, position size dimezzato
+- [ ] `src/bot/strategies/selector.py` — orchestratore regime-aware
+- [ ] Override manuale via `POST /api/v2/params`
+
+### 12.4 — Composite Confidence Score
+- [ ] Sostituire confidence singolo-indicatore con score composito:
+  - RSI alignment (0.2 weight)
+  - BB position (0.15 weight)
+  - Funding rate confirmation (0.15 weight)
+  - OI trend (0.15 weight)
+  - L/S ratio (0.1 weight)
+  - Volume confirmation (0.15 weight)
+  - Regime alignment (0.1 weight)
+- [ ] Soglia minima confidence 0.4 per piazzare trade (attualmente qualsiasi >0)
+
+### 12.5 — Cross-Asset Correlation Filter
+- [ ] Se BTC scende >1% in 5min, bloccare BUY_YES su ETH/SOL
+- [ ] Rolling correlation matrix BTC↔ETH, BTC↔SOL (30min window)
+- [ ] Se correlazione >0.7 e asset primario in forte trend, filtrare segnali contrarian su secondari
+
+### 12.6 — Strategy Hot-Swap
+- [ ] `POST /api/v2/strategies/enable` e `/disable` (senza restart)
+- [ ] ACTIVE_BOTS dinamico da DB invece che hardcoded in `core/types.py`
+- [ ] Audit log di ogni cambio strategia
+
+### Test target: ~60 nuovi test
+
+---
+
+## Phase 13: Live Trading Path — TODO
+
+> **Obiettivo:** Abilitare esecuzione reale su Polymarket CLOB.
+> **Motivazione:** Il bot è paper-only. Serve un adapter che invii ordini reali senza modificare la logica esistente.
+> **PREREQUISITO:** Tutti i criteri Go-Live della Fase 11 devono essere soddisfatti.
+
+### 13.1 — Order Execution Adapter
+- [ ] `src/bot/execution/adapters/paper.py` — refactor dell'execution attuale (paper mode)
+- [ ] `src/bot/execution/adapters/live.py` — CLOB reale via `py-clob-client`
+- [ ] Interface comune `OrderAdapter` con metodi: `place_order()`, `cancel_order()`, `get_order_status()`
+- [ ] Factory in config: `MODE=paper` → PaperAdapter, `MODE=live` → LiveAdapter
+- [ ] Limit orders (non market) per controllo slippage
+
+### 13.2 — Wallet Integration
+- [ ] Private key management sicuro (python-keyring, non .env)
+- [ ] `src/bot/execution/wallet.py` — balance check, approval, nonce management
+- [ ] Supporto per allowance USDC su Polymarket contract
+- [ ] Health check: wallet balance sufficiente per N trade
+
+### 13.3 — Order Lifecycle Management
+- [ ] Stato ordine: PENDING → FILLED → RESOLVED (o CANCELLED/EXPIRED)
+- [ ] Polling order status ogni 5s fino a fill
+- [ ] Gestione partial fills (accettare se >80% filled, cancellare il resto)
+- [ ] Timeout: cancellare ordine se non filled entro 30s
+
+### 13.4 — Retry & Error Handling
+- [ ] Retry con backoff esponenziale (1s, 2s, 4s) per ordini falliti
+- [ ] Max 3 retry per ordine
+- [ ] Errori non-retriable (insufficient funds, invalid market) → skip immediato
+- [ ] Logging dettagliato di ogni tentativo
+
+### 13.5 — Kill Switch
+- [ ] `POST /api/v2/kill` — cancella tutti gli ordini aperti, ferma tutti i bot
+- [ ] `POST /api/v2/pause` — pausa temporanea (riprende con `/resume`)
+- [ ] Telegram command: `/kill` e `/pause` via bot
+- [ ] Auto-kill se drawdown portfolio >25% in un giorno
+
+### 13.6 — Bankroll from Chain
+- [ ] `MODE=live` → leggere USDC balance da wallet Polygon
+- [ ] Riconciliazione periodica DB ↔ chain balance
+- [ ] Alert se discrepanza >5%
+
+### 13.7 — Gradual Rollout
+- [ ] Fase 1: Live con 1 sola strategia (Momentum/BTC), $5 max per trade
+- [ ] Fase 2: Aggiungere seconda strategia dopo 50 trade profittevoli
+- [ ] Fase 3: Full portfolio dopo 200+ trade e Sharpe >1.0
+
+### Test target: ~40 nuovi test (mock CLOB, wallet, lifecycle)
+
+---
+
+## Phase 14: Resilienza & Error Recovery — TODO
+
+> **Obiettivo:** Zero downtime, recovery automatico, nessun dato perso.
+> **Criticità trovate nel codice:**
+>   - `resolver.py:140` crea nuovo `httpx.AsyncClient` per ogni fetch (connection leak)
+>   - `binance_ws.py:122` muore dopo max_retries (nessun recovery)
+>   - `except Exception` generici ovunque (no error classification)
+
+### 14.1 — HTTP Client Pool (connection reuse)
+- [ ] Singolo `httpx.AsyncClient` condiviso per Gamma API (resolver + market finder)
+- [ ] Singolo client per Binance REST
+- [ ] Connection pool con limits: max_connections=20, max_keepalive=10
+- [ ] Lifecycle: creato in `main()`, passato via dependency injection, chiuso in shutdown
+
+### 14.2 — Retry Decorator
+- [ ] `src/bot/core/retry.py` — decorator `@with_retry(max_attempts=3, backoff="exponential")`
+- [ ] Configurabile: retriable exceptions (httpx.TimeoutException, httpx.ConnectError)
+- [ ] Non-retriable: 4xx errors (tranne 429)
+- [ ] 429 Too Many Requests → rispettare Retry-After header
+- [ ] Applicare a: `_fetch_market()`, `find_market()`, `get_best_ask()`, REST poll
+
+### 14.3 — Graceful Feed Degradation
+- [ ] Se Binance WS cade, auto-switch a REST polling 1s (non morire dopo max_retries)
+- [ ] Se REST fallisce, usare ultimo prezzo valido con flag `stale=True`
+- [ ] Se prezzo stale >60s, bloccare segnali per quell'asset
+- [ ] Metric: `feed_staleness_seconds` gauge per asset
+- [ ] Recovery automatico: tentare WS reconnect ogni 30s in background
+
+### 14.4 — Dead Letter Queue
+- [ ] Trade non risolvibili dopo 6 ore → spostare in `dead_letter_trades`
+- [ ] Dashboard widget per DLQ con azione manuale (resolve as WIN/LOSS/VOID)
+- [ ] Telegram alert per ogni trade in DLQ
+
+### 14.5 — Health Aggregator
+- [ ] `GET /api/v2/health/deep` — check composito:
+  - Feed health per asset (connected, staleness)
+  - Exchange health per adapter
+  - DB connectivity + latency
+  - Resolver cycle recency
+  - Open trade count vs expected
+  - Disk space, memory usage
+- [ ] Status: `HEALTHY`, `DEGRADED`, `UNHEALTHY`
+- [ ] Prometheus metric: `bot_health_status` (0/1/2)
+
+### 14.6 — Structured Error Classification
+- [ ] Enum `ErrorCategory`: NETWORK, API, DATA, RISK, INTERNAL
+- [ ] Ogni exception wrappata con categoria + context
+- [ ] Prometheus counter per categoria: `errors_total{category="NETWORK"}`
+- [ ] Alarm differenziati: NETWORK → warning, INTERNAL → critical
+
+### Test target: ~35 nuovi test
+
+---
+
+## Phase 15: Dashboard v2 — TODO
+
+> **Obiettivo:** Dashboard interattiva e mobile-ready con analytics avanzati.
+
+### 15.1 — Equity Curve Chart
+- [ ] Line chart (Recharts) con equity curve per strategia + portfolio aggregato
+- [ ] Time range selector: 1h, 6h, 24h, 7d, 30d
+- [ ] Tooltip con bankroll, P&L, drawdown al punto
+
+### 15.2 — Trade Analytics
+- [ ] Trade scatter plot: entry_price (x) vs P&L (y), colorato per outcome
+- [ ] Win rate heatmap per ora del giorno / giorno della settimana
+- [ ] Distribuzione confidence dei trade (histogram)
+- [ ] P&L per regime (bar chart: trending vs ranging vs volatile)
+
+### 15.3 — Strategy Controls
+- [ ] Toggle on/off per strategia (chiama `POST /api/v2/strategies/enable|disable`)
+- [ ] Slider per parametri principali (threshold, max_orders)
+- [ ] Confirm dialog prima di ogni cambio
+- [ ] Audit log visibile in dashboard
+
+### 15.4 — Log Viewer con Filtri
+- [ ] Filtro per: strategy, severity (INFO/WARN/ERROR), time range
+- [ ] Auto-scroll con pause on hover
+- [ ] Syntax highlighting per JSON payloads
+- [ ] Search full-text
+
+### 15.5 — Mobile & UX
+- [ ] Layout responsive (stack cards su mobile)
+- [ ] Bottom navigation bar su mobile
+- [ ] PWA manifest per installazione su home screen
+- [ ] Dark/Light theme toggle (attualmente solo dark)
+
+### 15.6 — Backtest Runner UI
+- [ ] Form con: strategy selector, asset, date range, bankroll iniziale
+- [ ] Progress bar durante esecuzione
+- [ ] Risultati inline con grafici (senza navigare ad altra pagina)
+- [ ] Confronto side-by-side di 2 backtest
+
+---
+
+## Phase 16: Data Pipeline & Analytics — TODO
+
+> **Obiettivo:** Storicizzare dati per ML futuro e analytics profonde.
+
+### 16.1 — Historical Data Ingest
+- [ ] Script `scripts/ingest_historical.py` — download OHLCV 1min da Binance (fino a 1 anno)
+- [ ] Storage in tabella `ohlcv_1m` (TimescaleDB hypertable se disponibile, altrimenti partitioned)
+- [ ] Incremental: solo nuovi dati ad ogni run
+- [ ] Supporto BTC, ETH, SOL
+
+### 16.2 — Backtest su Dati Reali
+- [ ] Modificare `data_provider.py` per caricare da `ohlcv_1m` invece di GBM sintetici
+- [ ] Replay realistico con spread e slippage storici
+- [ ] Confronto: backtest sintetico vs backtest su dati reali
+
+### 16.3 — Feature Store
+- [ ] Tabella `feature_store` (timestamp, asset, features_json)
+- [ ] Salvare ogni tick: RSI, BB%, CVD, VWAP%, funding, OI, L/S, regime, imbalance
+- [ ] Retention: 90 giorni rolling
+- [ ] Export: `scripts/export_features.py` → Parquet per analisi offline
+
+### 16.4 — P&L Attribution
+- [ ] Breakdown P&L per dimensione:
+  - Per strategia × asset
+  - Per ora del giorno (UTC)
+  - Per giorno della settimana
+  - Per regime di mercato
+  - Per confidence bucket (0-0.3, 0.3-0.6, 0.6-1.0)
+- [ ] API endpoint `GET /api/v2/analytics/attribution`
+- [ ] Dashboard widget con heatmap
+
+### 16.5 — TimescaleDB Migration
+- [ ] Migrare `price_history` e `ohlcv_1m` a hypertables
+- [ ] Continuous aggregates per 5m, 1h, 1d rollups
+- [ ] Compression policy: raw data 30 giorni, poi compresso
+- [ ] Query ottimizzate per time-series (time_bucket, last())
+
+---
+
+## Phase 17: Infrastructure Hardening — TODO
+
+> **Obiettivo:** Produzione enterprise-grade con CI/CD, monitoring, secrets.
+
+### 17.1 — CI/CD Pipeline (GitHub Actions)
+- [ ] `.github/workflows/ci.yml`:
+  - Lint: `ruff check src/ tests/`
+  - Type check: `mypy src/`
+  - Test: `pytest tests/ -v --asyncio-mode=auto`
+  - Coverage: `pytest --cov=src/bot --cov-report=xml`
+  - Build Docker: build + push a GHCR
+- [ ] PR checks: tutti devono passare prima del merge
+- [ ] Deploy automatico su VPS via SSH dopo merge su main
+
+### 17.2 — SSL/TLS
+- [ ] Let's Encrypt con certbot in container dedicato
+- [ ] Auto-renewal ogni 60 giorni
+- [ ] Nginx config per HTTPS redirect
+- [ ] HSTS header
+
+### 17.3 — Grafana Dashboard
+- [ ] Container Grafana in docker-compose
+- [ ] Dashboard pre-configurata (provisioning JSON):
+  - P&L real-time per strategia
+  - Trade rate per minuto
+  - Exchange latency heatmap
+  - Error rate per categoria
+  - Feed staleness per asset
+  - Circuit breaker status
+- [ ] Alert Grafana → Telegram per metriche critiche
+
+### 17.4 — Log Aggregation
+- [ ] Loki container per log centralizzati
+- [ ] Grafana Loki datasource per query log dalla stessa UI
+- [ ] Retention: 30 giorni
+- [ ] Label: strategy, asset, severity
+
+### 17.5 — Secrets Management
+- [ ] Migrare API keys da .env a Docker secrets
+- [ ] `docker secret create` per: API_KEY, DB_PASSWORD, TELEGRAM_TOKEN
+- [ ] Rotazione automatica chiavi ogni 30 giorni
+- [ ] Audit log accessi ai secret
+
+### 17.6 — Reliability
+- [ ] Docker restart policy: `restart: unless-stopped` (già presente, verificare)
+- [ ] Watchdog: script che controlla health endpoint ogni 60s, restart se 3x fail
+- [ ] Backup PostgreSQL: cron giornaliero + upload a S3/R2
+- [ ] Disaster recovery: script per restore da backup + re-deploy completo
+- [ ] Runbook documentato per incident response
+
+---
+
 ## Pre-Go-Live Checklist
 
 ### Tecnico
@@ -398,3 +775,5 @@ docker-compose.yml                # bot + dashboard + postgres + nginx + prometh
 | 2026-03-28 | 8 | Phase 8 completata — CORS, rate limiting, CSP, audit logging, dual API key rotation, SecurityMiddleware |
 | 2026-03-28 | 9 | Phase 9 completata — StrategyEvaluator, comparison (chi-square, Wilson CI), HTML report, API+CSV, 29 test |
 | 2026-03-31 | 10 | Phase 10 completata — ACTIVE_BOTS refactor, OpenAPI docs, E2E/stress/load tests, 40 nuovi test (478 totali) |
+| 2026-04-02 | — | Codice caricato su GitHub (ipnopuccio/PolyMarketPredictionBot), .gitignore, initial commit |
+| 2026-04-02 | 11-17 | V3 Roadmap scritta — 7 fasi, criteri Go-Live, priorità di esecuzione |

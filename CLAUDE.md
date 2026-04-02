@@ -306,6 +306,38 @@ ruff check src/
 
 ---
 
+## Workflow Rules (OBBLIGATORIO)
+
+### Auto-Commit dopo ogni modifica
+**Ogni volta che viene scritto o modificato codice, DEVI fare commit e push su GitHub.**
+
+Procedura:
+1. Completare la modifica (file nuovi o editati)
+2. `git add` dei file modificati (mai `.env`, `*.db`, `__pycache__/`)
+3. `git commit` con messaggio dettagliato che spiega:
+   - **Cosa** è stato fatto (quali file, quali componenti)
+   - **Perché** è stato fatto (quale fase della roadmap, quale bug, quale feature)
+   - **Cosa cambia** per l'utente/sistema (nuovi endpoint, nuovi test, nuovi comportamenti)
+4. `git push origin main`
+5. Confermare all'utente con il link al commit
+
+Formato commit message:
+```
+[Phase X.Y] Titolo breve della modifica
+
+Dettaglio:
+- File creati/modificati e perché
+- Nuovi test aggiunti (se applicabile)
+- Breaking changes (se applicabile)
+- Note tecniche rilevanti
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+```
+
+**MAI** committare: `.env`, `*.db`, `node_modules/`, `__pycache__/`, file con secrets.
+
+---
+
 ## Reference Documents
 
 The following strategic documents in `../files/` define the target architecture:
