@@ -18,12 +18,6 @@ This bot implements a production-ready trading system that:
 - **Resolves outcomes** via Gamma API (30s polling)
 - **Provides observability** with FastAPI dashboard, Prometheus metrics, structured JSON logging
 
-Only strategies with **positive P&L in v1 data** are enabled:
-- TurboCVD (ETH, 88% win rate, +$47.92)
-- TurboVWAP (ETH, 83.8% win rate, +$19.78)
-- Momentum (BTC, 96.4% win rate, +$12.80)
-- Momentum (SOL, 100% win rate, +$6.28)
-- Bollinger (BTC, 100% win rate, +$0.49)
 
 ---
 
