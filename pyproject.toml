@@ -1,0 +1,27 @@
+[project]
+name = "btc-bot-v2"
+version = "2.0.0"
+description = "Multi-strategy Polymarket Up/Down trading bot"
+requires-python = ">=3.11"
+dependencies = [
+    "websockets>=12.0",
+    "httpx>=0.27",
+    "aiosqlite>=0.20",
+    "pydantic>=2.5",
+    "pydantic-settings>=2.1",
+    "python-dotenv>=1.0",
+    "fastapi>=0.109",
+    "uvicorn>=0.27",
+    "jinja2>=3.1",
+    "numpy>=1.26",
+    "ccxt>=4.0",
+    "asyncpg>=0.29",
+    "prometheus-client>=0.20",
+    "python-json-logger>=2.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-asyncio"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

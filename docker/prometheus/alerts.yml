@@ -1,0 +1,130 @@
+groups:
+  - name: bot_alerts
+    rules:
+      # ── Trade execution ───────────────────────────────
+      - alert: NoTradesExecuted
+        expr: increase(trades_total[1h]) == 0
+        for: 2h
+        labels:
+          severity: warning
+        annotations:
+          summary: "No trades executed in 2+ hours"
+          description: "The bot has not placed any trades. Check feed connectivity and market availability."
+
+      - alert: HighLossRate
+        expr: |
+          (
+            sum(increase(trades_resolved_total{outcome="LOSS"}[1h]))
+            /
+            sum(increase(trades_resolved_total[1h]))
+          ) > 0.7
+        for: 30m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Loss rate >70% in the last hour"
+          description: "{{ $value | humanizePercentage }} of trades are losses. Review strategy parameters."
+
+      # ── Exchange connectivity ─────────────────────────
+      - alert: ExchangeDown
+        expr: exchange_up == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Exchange {{ $labels.exchange }} is down"
+          description: "Exchange {{ $labels.exchange }} has been disconnected for 5+ minutes."
+
+      - alert: PrimaryExchangeDown
+        expr: exchange_up{exchange="binance"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Primary exchange (Binance) is down"
+          description: "Binance feed is disconnected. Bot is running on secondary data only."
+
+      - alert: HighExchangeLatency
+        expr: histogram_quantile(0.95, rate(exchange_latency_ms_bucket[5m])) > 500
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Exchange {{ $labels.exchange }} p95 latency >500ms"
+          description: "{{ $labels.exchange }} API latency is {{ $value | humanize }}ms (p95)."
+
+      - alert: ExchangeErrors
+        expr: increase(exchange_errors_total[15m]) > 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High error rate on {{ $labels.exchange }}"
+          description: "{{ $value }} errors in the last 15 minutes on {{ $labels.exchange }}."
+
+      # ── Risk management ───────────────────────────────
+      - alert: CircuitBreakerTripped
+        expr: circuit_breaker_active == 1
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Circuit breaker active for {{ $labels.strategy }}"
+          description: "Strategy {{ $labels.strategy }} has hit consecutive loss limit."
+
+      - alert: HighDrawdown
+        expr: drawdown_pct > 0.20
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Drawdown >20% on {{ $labels.strategy }}/{{ $labels.asset }}"
+          description: "Current drawdown: {{ $value | humanizePercentage }}. Portfolio pause may trigger."
+
+      - alert: RiskEventsSpike
+        expr: increase(risk_events_total[30m]) > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Risk events spike"
+          description: "{{ $value }} risk events in the last 30 minutes."
+
+      # ── WebSocket / Dashboard ─────────────────────────
+      - alert: WSMessagesDrop
+        expr: increase(ws_messages_dropped_total[10m]) > 50
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "WebSocket messages being dropped"
+          description: "{{ $value }} messages dropped in 10 minutes — clients may be falling behind."
+
+      # ── Database ──────────────────────────────────────
+      - alert: SlowDBQueries
+        expr: histogram_quantile(0.95, rate(db_query_latency_ms_bucket[5m])) > 100
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Database p95 latency >100ms"
+          description: "{{ $labels.operation }} queries are slow ({{ $value | humanize }}ms p95)."
+
+      - alert: DBErrors
+        expr: increase(db_errors_total[15m]) > 3
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Database errors detected"
+          description: "{{ $value }} database errors in the last 15 minutes."
+
+      # ── System health ─────────────────────────────────
+      - alert: BotDown
+        expr: up{job="bot"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Bot is unreachable"
+          description: "Prometheus cannot scrape the bot /metrics endpoint. Service may be down."

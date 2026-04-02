@@ -1,0 +1,138 @@
+# docker-compose.yml — btc-bot-v2
+# Requires Docker Compose v2 (the `docker compose` subcommand, no version: key).
+#
+# Quick start:
+#   cp .env.example .env && $EDITOR .env   # set DB_PASSWORD + API_KEY
+#   docker compose up -d
+#   docker compose logs -f bot
+
+services:
+
+  # ── Trading bot + FastAPI dashboard ────────────────────────────────────────
+  bot:
+    build:
+      context: .
+      dockerfile: docker/bot.Dockerfile
+    env_file: .env
+    environment:
+      # Override DB settings for PostgreSQL inside the compose network.
+      # DB_URL is the SQLAlchemy async URL used when DB_PATH is empty.
+      - DB_URL=postgresql://tradingbot:${DB_PASSWORD:-tradingbot}@postgres:5432/trading_bot
+      # Setting DB_PATH to empty string signals the app to use DB_URL instead.
+      - DB_PATH=
+      - DASHBOARD_PORT=5003
+      - LOG_FORMAT=json
+    ports:
+      - "5003:5003"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - bot-logs:/app/logs
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5003/api/overview"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    # Resource limits — tune to your VPS size
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+
+  # ── React SPA served by Nginx ───────────────────────────────────────────────
+  # Build context is the project root so the Dockerfile can reach both
+  # dashboard/ (Node source) and docker/dashboard-nginx.conf.
+  dashboard:
+    build:
+      context: .
+      dockerfile: docker/dashboard.Dockerfile
+    ports:
+      - "3000:80"
+    depends_on:
+      - bot
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 64M
+
+  # ── PostgreSQL 16 ───────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: trading_bot
+      POSTGRES_USER: tradingbot
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-tradingbot}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      # SQL files placed in docker/postgres/ are executed once on first init
+      - ./docker/postgres:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tradingbot -d trading_bot"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+
+  # ── Prometheus (metrics + alerting) ──────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./docker/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    depends_on:
+      - bot
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9090/-/healthy"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128M
+
+  # ── Nginx reverse proxy (HTTP + HTTPS termination) ──────────────────────────
+  # SSL: place cert.pem + key.pem in docker/ssl/ before enabling HTTPS blocks
+  # in docker/nginx.conf.
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./docker/nginx.conf:/etc/nginx/nginx.conf:ro
+      # Mount ssl dir; contents can be empty until certs are provisioned
+      - ./docker/ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - bot
+      - dashboard
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 32M
+
+# ── Named volumes ────────────────────────────────────────────────────────────
+volumes:
+  postgres-data:
+  bot-logs:
+  prometheus-data:
