@@ -93,6 +93,14 @@ class ExchangeConfig(BaseSettings):
     poll_interval: int = 5
 
 
+class TelegramConfig(BaseSettings):
+    """Telegram notification settings."""
+    bot_token: str = ""
+    chat_id: str = ""
+    enabled: bool = False
+    rate_limit_per_min: int = 30
+
+
 class SecurityConfig(BaseSettings):
     """Security hardening configuration."""
     # CORS allowed origins (comma-separated in .env)
@@ -132,6 +140,7 @@ class Settings(BaseSettings):
     sizer: SizerConfig = Field(default_factory=SizerConfig)
     exchanges: ExchangeConfig = Field(default_factory=ExchangeConfig)
     security: SecurityConfig = Field(default_factory=SecurityConfig)
+    telegram: TelegramConfig = Field(default_factory=TelegramConfig)
 
     @property
     def strategy_configs(self) -> dict[str, StrategyConfig]:

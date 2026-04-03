@@ -43,7 +43,8 @@ CREATE TABLE IF NOT EXISTS trades (
     liq_short_at_signal     DOUBLE PRECISION,
     vwap_change_at_signal   DOUBLE PRECISION,
     rsi_at_signal           DOUBLE PRECISION,
-    bb_pct_at_signal        DOUBLE PRECISION
+    bb_pct_at_signal        DOUBLE PRECISION,
+    indicators_json         JSONB               -- Full indicator snapshot (Phase 11.3)
 );
 
 -- Composite index: used by get_stats() and get_rolling_stats() per (strategy, asset)
@@ -150,3 +151,21 @@ CREATE TABLE IF NOT EXISTS regime_history (
 -- Index: used by regime lookups per asset ordered by recency
 CREATE INDEX IF NOT EXISTS idx_regime_history_asset_id
     ON regime_history (asset, id DESC);
+
+-- =============================================================================
+-- Table: equity_snapshots (Phase 11.2)
+-- Periodic bankroll snapshots for equity curve charting.
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS equity_snapshots (
+    id          SERIAL              PRIMARY KEY,
+    timestamp   DOUBLE PRECISION    NOT NULL,
+    strategy    TEXT                NOT NULL,
+    asset       TEXT                NOT NULL,
+    bankroll    DOUBLE PRECISION    NOT NULL,
+    total_pnl   DOUBLE PRECISION    NOT NULL,
+    open_trades INTEGER             NOT NULL DEFAULT 0,
+    created_at  TIMESTAMPTZ         DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_equity_ts
+    ON equity_snapshots (strategy, asset, timestamp);

@@ -1,6 +1,7 @@
 """Async SQLite database layer using aiosqlite."""
 from __future__ import annotations
 
+import json
 import aiosqlite
 from datetime import datetime, timezone
 from typing import Any
@@ -50,7 +51,8 @@ class Database:
                 liq_short_at_signal REAL,
                 vwap_change_at_signal REAL,
                 rsi_at_signal REAL,
-                bb_pct_at_signal REAL
+                bb_pct_at_signal REAL,
+                indicators_json TEXT
             );
 
             CREATE INDEX IF NOT EXISTS idx_trades_strategy_asset_outcome
@@ -114,6 +116,20 @@ class Database:
                 bb_width REAL,
                 ema_slope REAL
             );
+
+            CREATE TABLE IF NOT EXISTS equity_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp REAL NOT NULL,
+                strategy TEXT NOT NULL,
+                asset TEXT NOT NULL,
+                bankroll REAL NOT NULL,
+                total_pnl REAL NOT NULL,
+                open_trades INTEGER NOT NULL DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_equity_ts
+                ON equity_snapshots(strategy, asset, timestamp);
         """)
         await self.conn.commit()
 
@@ -171,7 +187,8 @@ class Database:
         self, strategy: str, asset: str, market_id: str | None,
         signal: str, entry_price: float, bet_size: float,
         confidence: float, regime: str, snapshot: dict,
-        rsi: float | None = None, bb_pct: float | None = None
+        rsi: float | None = None, bb_pct: float | None = None,
+        indicators_json: str | None = None,
     ) -> int | None:
         bankroll_row = await (await self.conn.execute(
             "SELECT current FROM bankroll WHERE strategy=? AND asset=?",
@@ -193,13 +210,14 @@ class Database:
                (timestamp, strategy, asset, market_id, signal, entry_price, bet_size,
                 confidence, regime,
                 cvd_at_signal, funding_at_signal, liq_long_at_signal,
-                liq_short_at_signal, vwap_change_at_signal, rsi_at_signal, bb_pct_at_signal)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                liq_short_at_signal, vwap_change_at_signal, rsi_at_signal, bb_pct_at_signal,
+                indicators_json)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (self._now(), strategy, asset, market_id, signal, entry_price, bet_size,
              confidence, regime,
              snapshot.get("cvd_2min"), snapshot.get("funding_rate"),
              snapshot.get("liq_long_2min"), snapshot.get("liq_short_2min"),
-             snapshot.get("vwap_change"), rsi, bb_pct)
+             snapshot.get("vwap_change"), rsi, bb_pct, indicators_json)
         )
         await self.conn.commit()
         return cur.lastrowid
@@ -245,6 +263,16 @@ class Database:
 
         async with self.conn.execute(query, params) as cur:
             return [dict(r) for r in await cur.fetchall()]
+
+    async def get_trade_indicators(self, trade_id: int) -> dict | None:
+        """Return parsed indicators_json for a specific trade."""
+        async with self.conn.execute(
+            "SELECT indicators_json FROM trades WHERE id=?", (trade_id,)
+        ) as cur:
+            row = await cur.fetchone()
+            if not row or not row["indicators_json"]:
+                return None
+            return json.loads(row["indicators_json"])
 
     async def get_rolling_stats(self, strategy: str, asset: str,
                                  n: int = 50) -> dict:
@@ -420,6 +448,53 @@ class Database:
             "SELECT * FROM trades WHERE strategy=? ORDER BY id DESC LIMIT ?",
             (strategy, limit)
         ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+    # ─── Active positions count per direction ───────────────
+
+    # ─── Equity Snapshots ──────────────────────────────────
+
+    async def save_equity_snapshot(
+        self, strategy: str, asset: str, bankroll: float,
+        total_pnl: float, open_trades: int = 0,
+    ) -> None:
+        """Record an equity snapshot for charting the equity curve."""
+        import time
+        await self.conn.execute(
+            "INSERT INTO equity_snapshots (timestamp, strategy, asset, bankroll, total_pnl, open_trades) "
+            "VALUES (?,?,?,?,?,?)",
+            (time.time(), strategy, asset, bankroll, total_pnl, open_trades),
+        )
+        await self.conn.commit()
+
+    async def get_equity_curve(
+        self, strategy: str | None = None, asset: str | None = None,
+        since_ts: float | None = None,
+    ) -> list[dict]:
+        """Return equity snapshots as a time series, optionally filtered.
+
+        Args:
+            strategy: Filter by strategy name (optional).
+            asset: Filter by asset ticker (optional).
+            since_ts: Only return snapshots after this Unix timestamp (optional).
+
+        Returns:
+            List of snapshot dicts sorted by timestamp ascending.
+        """
+        query = "SELECT * FROM equity_snapshots WHERE 1=1"
+        params: list[Any] = []
+        if strategy:
+            query += " AND strategy=?"
+            params.append(strategy)
+        if asset:
+            query += " AND asset=?"
+            params.append(asset)
+        if since_ts is not None:
+            query += " AND timestamp>=?"
+            params.append(since_ts)
+        query += " ORDER BY timestamp ASC"
+
+        async with self.conn.execute(query, params) as cur:
             return [dict(r) for r in await cur.fetchall()]
 
     # ─── Active positions count per direction ───────────────

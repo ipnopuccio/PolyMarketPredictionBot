@@ -33,12 +33,14 @@ from bot.market.finder import MarketFinder
 from bot.market.orderbook import OrderbookFetcher
 from bot.storage.database import Database
 from bot.storage.factory import create_database
+from bot.notifications.telegram import TelegramNotifier
 from bot.strategies import (
     BollingerStrategy,
     MomentumStrategy,
     TurboCvdStrategy,
     TurboVwapStrategy,
 )
+from bot.strategies.regime import classify as classify_regime
 
 log = logging.getLogger(__name__)
 
@@ -71,11 +73,14 @@ async def run_bot(
     db: Database,
     exchange_mgr: ExchangeManager | None = None,
     bus: EventBus | None = None,
+    notifier: TelegramNotifier | None = None,
 ) -> None:
     """Main loop for a single bot."""
     name = strategy.name
     cfg = strategy.cfg
     is_scaling = strategy.sizing_mode == "scaling"
+    # Price buffer for regime detection (rolling 60 prices ~ 60 signal cycles)
+    _price_buf: list[float] = []
 
     while True:
         try:
@@ -93,6 +98,16 @@ async def run_bot(
 
             # Update RSI feed with latest price
             rsi_feed.update(asset, snapshot.last_price)
+
+            # Build price buffer for regime detection
+            if snapshot.last_price > 0:
+                _price_buf.append(snapshot.last_price)
+                if len(_price_buf) > 200:
+                    _price_buf.pop(0)
+
+            # Classify market regime
+            regime_result = classify_regime(_price_buf)
+            regime_label = regime_result.regime.value
 
             rsi = rsi_feed.get_rsi(asset)
             bb = rsi_feed.get_bollinger(asset)
@@ -119,7 +134,7 @@ async def run_bot(
                 snapshot=snapshot.to_dict(),
                 rsi=rsi,
                 bb_pct=bb_pct,
-                regime="UNKNOWN",
+                regime=regime_label,
                 market_info=mkt_info,
             )
 
@@ -174,6 +189,28 @@ async def metrics_publisher(db: Database, bus: EventBus) -> None:
             })
         except Exception as e:
             log.debug("Metrics publish error: %s", e)
+
+
+async def equity_snapshot_task(db: Database) -> None:
+    """Record equity snapshots every 5 minutes for equity curve charting."""
+    strategy_names = list({_CLASS_TO_CONFIG[cls.__name__] for cls, _ in ACTIVE_BOTS})
+    asset_names = list({a for _, a in ACTIVE_BOTS})
+
+    while True:
+        await asyncio.sleep(300)  # 5 minutes
+        try:
+            all_stats = await db.get_all_stats(strategy_names, asset_names)
+            for s in all_stats:
+                open_trades = await db.get_open_trades(s["strategy"], s["asset"])
+                await db.save_equity_snapshot(
+                    strategy=s["strategy"],
+                    asset=s["asset"],
+                    bankroll=s.get("bankroll", 0),
+                    total_pnl=s.get("total_pnl", 0),
+                    open_trades=len(open_trades),
+                )
+        except Exception as e:
+            log.debug("Equity snapshot error: %s", e)
 
 
 async def price_recorder(feed: BinanceFeed, db: Database) -> None:
@@ -277,6 +314,24 @@ async def main() -> None:
     ws_bridge = WSBridge(bus, broker)
     ws_bridge.install()
 
+    # Telegram notifier
+    tg = TelegramNotifier(
+        bot_token=settings.telegram.bot_token,
+        chat_id=settings.telegram.chat_id,
+        enabled=settings.telegram.enabled,
+        rate_limit_per_min=settings.telegram.rate_limit_per_min,
+    )
+
+    # Wire Telegram to EventBus events
+    if tg.is_enabled:
+        async def _on_trade_placed(data: dict) -> None:
+            await tg.notify_trade_placed(data)
+        async def _on_trade_resolved(data: dict) -> None:
+            await tg.notify_trade_resolved(data)
+        bus.subscribe("trade.placed", _on_trade_placed)
+        bus.subscribe("trade.resolved", _on_trade_resolved)
+        log.info("Telegram notifications enabled")
+
     # Multi-exchange setup
     exchange_mgr = ExchangeManager()
     binance_adapter = BinanceAdapter(feed)
@@ -331,7 +386,7 @@ async def main() -> None:
     # 2. Bot tasks
     for strategy, asset in bot_list:
         task = asyncio.create_task(
-            run_bot(strategy, asset, feed, rsi, executor, db, exchange_mgr, bus),
+            run_bot(strategy, asset, feed, rsi, executor, db, exchange_mgr, bus, tg),
             name=f"bot_{strategy.name}_{asset}",
         )
         tasks.append(task)
@@ -346,6 +401,9 @@ async def main() -> None:
     # 4b. Periodic metrics publisher (every 30s → WS metrics channel)
     tasks.append(asyncio.create_task(metrics_publisher(db, bus), name="metrics_pub"))
 
+    # 4c. Equity snapshot recorder (every 5min)
+    tasks.append(asyncio.create_task(equity_snapshot_task(db), name="equity_snap"))
+
     # 5. Dashboard (with WebSocket broker + exchange health)
     tasks.append(asyncio.create_task(
         run_dashboard(db, broker, exchange_mgr), name="dashboard",
@@ -353,12 +411,18 @@ async def main() -> None:
 
     print(f"\n[Bot] {n} bot attivi. Dashboard: http://localhost:{settings.dashboard_port}\n")
 
+    # Telegram startup notification
+    if tg.is_enabled:
+        await tg.notify_startup(n, total)
+
     # ── Wait for shutdown ────────────────────────────────
     await stop.wait()
     for t in tasks:
         t.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)
     await exchange_mgr.stop_all()
+    if tg.is_enabled:
+        await tg.notify_shutdown("signal")
     await db.close()
     print("[Bot] Shutdown complete.")
 

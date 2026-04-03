@@ -209,3 +209,29 @@ async def get_exchanges(request: Request) -> dict:
         return {"total": 0, "healthy": 0, "exchanges": []}
 
     return exchange_mgr.summary()
+
+
+# ── GET /equity ────────────────────────────────────────
+@router.get("/equity")
+async def get_equity(
+    request: Request,
+    strategy: str | None = Query(None),
+    asset: str | None = Query(None),
+    days: int = Query(7, ge=1, le=90),
+) -> list[dict]:
+    """Equity curve time series, optionally filtered by strategy/asset."""
+    import time
+    db = request.app.state.db
+    since_ts = time.time() - (days * 86400)
+    return await db.get_equity_curve(strategy=strategy, asset=asset, since_ts=since_ts)
+
+
+# ── GET /trades/{trade_id}/indicators ──────────────────
+@router.get("/trades/{trade_id}/indicators")
+async def get_trade_indicators(request: Request, trade_id: int) -> dict:
+    """Full indicator snapshot at trade time for post-mortem analysis."""
+    db = request.app.state.db
+    indicators = await db.get_trade_indicators(trade_id)
+    if indicators is None:
+        return {"trade_id": trade_id, "indicators": None}
+    return {"trade_id": trade_id, "indicators": indicators}

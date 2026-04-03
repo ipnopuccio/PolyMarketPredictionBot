@@ -160,6 +160,22 @@ class PostgresDatabase:
                     ema_slope DOUBLE PRECISION
                 );
             """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS equity_snapshots (
+                    id SERIAL PRIMARY KEY,
+                    timestamp DOUBLE PRECISION NOT NULL,
+                    strategy TEXT NOT NULL,
+                    asset TEXT NOT NULL,
+                    bankroll DOUBLE PRECISION NOT NULL,
+                    total_pnl DOUBLE PRECISION NOT NULL,
+                    open_trades INTEGER NOT NULL DEFAULT 0,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                );
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_equity_ts
+                    ON equity_snapshots(strategy, asset, timestamp);
+            """)
         log.info("PostgresDatabase schema initialised")
 
     # ── helpers ──────────────────────────────────────────────
@@ -271,6 +287,7 @@ class PostgresDatabase:
         snapshot: dict,
         rsi: float | None = None,
         bb_pct: float | None = None,
+        indicators_json: str | None = None,
     ) -> int | None:
         """Atomically reserve bankroll and insert a new trade.
 
@@ -321,14 +338,15 @@ class PostgresDatabase:
                         entry_price, bet_size, confidence, regime,
                         cvd_at_signal, funding_at_signal,
                         liq_long_at_signal, liq_short_at_signal,
-                        vwap_change_at_signal, rsi_at_signal, bb_pct_at_signal)
-                       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+                        vwap_change_at_signal, rsi_at_signal, bb_pct_at_signal,
+                        indicators_json)
+                       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
                        RETURNING id""",
                     self._now(), strategy, asset, market_id, signal,
                     entry_price, bet_size, confidence, regime,
                     snapshot.get("cvd_2min"), snapshot.get("funding_rate"),
                     snapshot.get("liq_long_2min"), snapshot.get("liq_short_2min"),
-                    snapshot.get("vwap_change"), rsi, bb_pct,
+                    snapshot.get("vwap_change"), rsi, bb_pct, indicators_json,
                 )
                 return row["id"] if row else None
 
@@ -399,6 +417,17 @@ class PostgresDatabase:
 
         rows = await self.pool.fetch(query, *params)
         return self._rows(rows)
+
+    async def get_trade_indicators(self, trade_id: int) -> dict | None:
+        """Return parsed indicators_json for a specific trade."""
+        import json
+        row = await self.pool.fetchrow(
+            "SELECT indicators_json FROM trades WHERE id=$1", trade_id,
+        )
+        if not row or not row["indicators_json"]:
+            return None
+        raw = row["indicators_json"]
+        return json.loads(raw) if isinstance(raw, str) else dict(raw)
 
     async def get_rolling_stats(
         self,
@@ -728,6 +757,64 @@ class PostgresDatabase:
             "SELECT * FROM trades WHERE strategy=$1 ORDER BY id DESC LIMIT $2",
             strategy, limit,
         )
+        return self._rows(rows)
+
+    # ─── Active positions count per direction ───────────────
+
+    # ─── Equity Snapshots ──────────────────────────────────
+
+    async def save_equity_snapshot(
+        self, strategy: str, asset: str, bankroll: float,
+        total_pnl: float, open_trades: int = 0,
+    ) -> None:
+        """Record an equity snapshot for charting the equity curve.
+
+        Args:
+            strategy: Strategy name.
+            asset: Asset ticker.
+            bankroll: Current bankroll value.
+            total_pnl: Cumulative realised P&L.
+            open_trades: Number of currently open trades.
+        """
+        import time
+        await self.pool.execute(
+            "INSERT INTO equity_snapshots (timestamp, strategy, asset, bankroll, total_pnl, open_trades) "
+            "VALUES ($1, $2, $3, $4, $5, $6)",
+            time.time(), strategy, asset, bankroll, total_pnl, open_trades,
+        )
+
+    async def get_equity_curve(
+        self, strategy: str | None = None, asset: str | None = None,
+        since_ts: float | None = None,
+    ) -> list[dict]:
+        """Return equity snapshots as a time series, optionally filtered.
+
+        Args:
+            strategy: Filter by strategy name (optional).
+            asset: Filter by asset ticker (optional).
+            since_ts: Only return snapshots after this Unix timestamp (optional).
+
+        Returns:
+            List of snapshot dicts sorted by timestamp ascending.
+        """
+        query = "SELECT * FROM equity_snapshots WHERE TRUE"
+        params: list = []
+        idx = 0
+        if strategy:
+            idx += 1
+            query += f" AND strategy=${idx}"
+            params.append(strategy)
+        if asset:
+            idx += 1
+            query += f" AND asset=${idx}"
+            params.append(asset)
+        if since_ts is not None:
+            idx += 1
+            query += f" AND timestamp>=${idx}"
+            params.append(since_ts)
+        query += " ORDER BY timestamp ASC"
+
+        rows = await self.pool.fetch(query, *params)
         return self._rows(rows)
 
     # ─── Active positions count per direction ───────────────

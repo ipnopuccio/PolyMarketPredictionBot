@@ -9,6 +9,7 @@ All pre-trade checks are centralised here:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from datetime import datetime, timezone
 
@@ -198,6 +199,22 @@ class Executor:
         # 9. Build snapshot dict from the FeedSnapshot
         snapshot = result.snapshot.to_dict()
 
+        # 9b. Build comprehensive indicators JSON for post-mortem analysis
+        full_indicators = {
+            "rsi": result.indicators.get("rsi"),
+            "bb_pct": result.indicators.get("bb_pct"),
+            "cvd": snapshot.get("cvd_2min"),
+            "vwap_change": snapshot.get("vwap_change"),
+            "funding_rate": snapshot.get("funding_rate"),
+            "open_interest": snapshot.get("open_interest"),
+            "long_short_ratio": snapshot.get("long_short_ratio"),
+            "book_imbalance": snapshot.get("book_imbalance"),
+            "liq_long_2min": snapshot.get("liq_long_2min"),
+            "liq_short_2min": snapshot.get("liq_short_2min"),
+            "regime": result.indicators.get("regime", "UNKNOWN"),
+            "confidence": result.confidence,
+        }
+
         # 10. Insert trade
         trade_id = await self._db.reserve_and_insert_trade(
             strategy=strategy,
@@ -211,6 +228,7 @@ class Executor:
             snapshot=snapshot,
             rsi=result.indicators.get("rsi"),
             bb_pct=result.indicators.get("bb_pct"),
+            indicators_json=json.dumps(full_indicators),
         )
 
         if trade_id is None:

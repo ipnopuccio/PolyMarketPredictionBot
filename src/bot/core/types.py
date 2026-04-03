@@ -18,6 +18,24 @@ class Regime(str, Enum):
     UNKNOWN = "UNKNOWN"
 
 
+class RegimeType(str, Enum):
+    """Market regime classification (used by regime detector)."""
+    TRENDING = "TRENDING"
+    RANGING = "RANGING"
+    VOLATILE = "VOLATILE"
+    UNKNOWN = "UNKNOWN"
+
+
+@dataclass(frozen=True)
+class RegimeResult:
+    """Output of the regime classifier."""
+    regime: RegimeType
+    adx: float
+    bb_width: float
+    ema_slope: float
+    confidence: float  # 0.0 to 1.0
+
+
 @dataclass(frozen=True)
 class FeedSnapshot:
     """Immutable snapshot of Binance feed state for one asset."""
