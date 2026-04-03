@@ -20,7 +20,7 @@
 | 8 | Security Hardening | **DONE** | 0 | CORS, rate limit, CSP, audit, key rotation |
 | 9 | Strategy Evaluation | **DONE** | 29 | Evaluator + comparison + report + API + CSV |
 | 10 | Optimization & Polish | **DONE** | 40 | Refactor, E2E, stress, load, OpenAPI |
-| 11 | Paper Validation & Alerting | TODO | 0 | Regime detection, Telegram alerts, equity tracking |
+| 11 | Paper Validation & Alerting | **DONE** | 36 | Regime detection, Telegram alerts, equity tracking, trade journaling |
 | 12 | Strategy Intelligence | TODO | 0 | Adaptive thresholds, multi-TF, regime-based selection |
 | 13 | Live Trading Path | TODO | 0 | CLOB execution, wallet, kill switch, dual mode |
 | 14 | Resilienza & Recovery | TODO | 0 | HTTP pool, retry decorator, graceful degradation |
@@ -28,7 +28,7 @@
 | 16 | Data Pipeline & Analytics | TODO | 0 | TimescaleDB, historical ingest, feature store |
 | 17 | Infrastructure Hardening | TODO | 0 | SSL, Grafana, CI/CD, secrets management |
 
-**Totale test: 478 passing (18.55s)**
+**Totale test: 513 passing (4.60s)**
 
 ---
 
@@ -336,7 +336,7 @@ ONGOING    (Settimana 8+)    → Fasi 15-17: Dashboard v2, data pipeline, infra 
 
 ---
 
-## Phase 11: Paper Trading Validation & Alerting — TODO
+## Phase 11: Paper Trading Validation & Alerting — DONE (2026-04-03)
 
 > **Obiettivo:** Validare le strategie su dati reali di mercato e ricevere notifiche in tempo reale.
 > **Motivazione:** Il bot gira con `regime="UNKNOWN"` hardcoded, nessun alerting, nessuna equity curve reale.
@@ -777,3 +777,4 @@ docker-compose.yml                # bot + dashboard + postgres + nginx + prometh
 | 2026-03-31 | 10 | Phase 10 completata — ACTIVE_BOTS refactor, OpenAPI docs, E2E/stress/load tests, 40 nuovi test (478 totali) |
 | 2026-04-02 | — | Codice caricato su GitHub (ipnopuccio/PolyMarketPredictionBot), .gitignore, initial commit |
 | 2026-04-02 | 11-17 | V3 Roadmap scritta — 7 fasi, criteri Go-Live, priorità di esecuzione |
+| 2026-04-03 | 11 | Phase 11 completata — Regime detection (ADX+BB+EMA), equity snapshots 5min, trade journaling (12 indicators), Telegram alerts (8 tipi), 36 nuovi test (513 totali) |
