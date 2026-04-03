@@ -543,13 +543,37 @@ open htmlcov/index.html
 - **Async/await** for I/O-bound operations
 - **Pydantic** for all data validation
 
+### Branching Model
+
+- `main`: stable branch, updated only via reviewed PRs
+- `develop`: integration branch for completed feature branches
+- `feature/feeds-*`: `src/bot/feeds` and exchange health work
+- `feature/strategies-*`: `src/bot/strategies` and parameter tuning
+- `feature/execution-risk-*`: `src/bot/execution` (executor, risk, sizer, resolver)
+- `feature/dashboard-api-*`: `src/bot/dashboard` and FastAPI endpoints
+- `feature/storage-*`: `src/bot/storage` (sqlite/postgres/factory)
+- `feature/backtest-*`: `src/bot/backtest` and reporting
+- `feature/monitoring-*`: metrics, logging, Prometheus integration
+- `chore/devops-*`: Docker, compose, deployment, backup, health scripts
+- `test/*`: test-only changes and test refactors
+- `docs/*`: README, ROADMAP, and technical documentation updates
+
+### Workflow Rules
+
+- Keep branches small and topic-focused (one goal per branch)
+- Open short PRs to `develop` frequently (avoid large PRs)
+- Use ticket-based naming: `feature/<area>-<short-task>`
+- Rebase/fetch regularly from `develop` to minimize conflicts
+- Merge to `main` only for validated release-ready changes
+
 ### Adding Features
 
-1. Create a new branch: `git checkout -b feature/my-feature`
+1. Sync `develop`: `git checkout develop && git pull`
+2. Create a topic branch from `develop`: `git checkout -b feature/<area>-<short-task>`
 2. Write tests first (TDD)
 3. Implement feature
 4. Ensure all tests pass: `pytest -v`
-5. Submit PR
+5. Submit PR to `develop`
 
 ### Debugging
 
