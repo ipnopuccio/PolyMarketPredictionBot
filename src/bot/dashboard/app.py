@@ -22,6 +22,7 @@ def create_app(
     db: Database,
     broker: WSBroker | None = None,
     exchange_mgr: Any = None,
+    selector: Any = None,
 ) -> FastAPI:
     app = FastAPI(
         title="Polymarket Bot v2",
@@ -33,6 +34,7 @@ def create_app(
     app.state.db = db
     app.state.broker = broker
     app.state.exchange_mgr = exchange_mgr
+    app.state.selector = selector
 
     # ── Security middleware (rate limit, body size, headers, audit) ──
     app.add_middleware(SecurityMiddleware)

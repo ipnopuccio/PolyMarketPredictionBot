@@ -102,6 +102,7 @@ class Executor:
         strategy_cfg: StrategyConfig,
         *,
         scaling: bool = True,
+        size_multiplier: float = 1.0,
     ) -> int | None:
         """Place a trade if all checks pass.
 
@@ -110,6 +111,7 @@ class Executor:
             strategy_cfg: Configuration for the strategy that produced the signal.
             scaling: If True allow multiple orders per window (scaling mode).
                      If False allow only one order per market per window (dynamic).
+            size_multiplier: Regime-based multiplier (Phase 12.3), e.g. 0.5 for volatile.
 
         Returns:
             Trade ID on success, None if skipped.
@@ -193,8 +195,10 @@ class Executor:
             )
             return None
 
-        # 8. Position size
+        # 8. Position size (with regime-based multiplier from Phase 12.3)
         bet_size = await self._sizer.kelly_size(self._db, strategy, asset, bankroll)
+        if size_multiplier != 1.0:
+            bet_size = max(1.0, bet_size * size_multiplier)
 
         # 9. Build snapshot dict from the FeedSnapshot
         snapshot = result.snapshot.to_dict()

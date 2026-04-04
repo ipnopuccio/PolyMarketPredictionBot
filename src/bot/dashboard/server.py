@@ -22,6 +22,8 @@ from bot.dashboard.auth import verify_api_key
 from bot.dashboard.log_buffer import LogBuffer
 from bot.network.vpn_guard import is_vpn_active
 
+from bot.strategies.selector import StrategySelector
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v2", dependencies=[Depends(verify_api_key)], tags=["Dashboard"])
@@ -235,3 +237,102 @@ async def get_trade_indicators(request: Request, trade_id: int) -> dict:
     if indicators is None:
         return {"trade_id": trade_id, "indicators": None}
     return {"trade_id": trade_id, "indicators": indicators}
+
+
+# ── Phase 12.6: Strategy Hot-Swap ──────────────────────
+
+@router.post("/strategies/enable")
+async def enable_strategy(request: Request, body: dict[str, Any]) -> dict:
+    """Enable a strategy via manual override (no restart required).
+
+    Body: {"strategy": "MOMENTUM"}
+    """
+    selector: StrategySelector | None = getattr(request.app.state, "selector", None)
+    if selector is None:
+        return {"error": "Strategy selector not initialized"}
+
+    strategy_name = body.get("strategy", "").upper()
+    if not strategy_name:
+        return {"error": "Missing 'strategy' field"}
+
+    selector.set_override(strategy_name, True)
+    logger.info("[HotSwap] Strategy %s manually ENABLED", strategy_name)
+
+    # Audit log
+    db = request.app.state.db
+    await db.log_risk_event("STRATEGY_ENABLED", strategy_name, "", f"Manual override via API")
+
+    return {"strategy": strategy_name, "enabled": True, "override": True}
+
+
+@router.post("/strategies/disable")
+async def disable_strategy(request: Request, body: dict[str, Any]) -> dict:
+    """Disable a strategy via manual override (no restart required).
+
+    Body: {"strategy": "MOMENTUM"}
+    """
+    selector: StrategySelector | None = getattr(request.app.state, "selector", None)
+    if selector is None:
+        return {"error": "Strategy selector not initialized"}
+
+    strategy_name = body.get("strategy", "").upper()
+    if not strategy_name:
+        return {"error": "Missing 'strategy' field"}
+
+    selector.set_override(strategy_name, False)
+    logger.info("[HotSwap] Strategy %s manually DISABLED", strategy_name)
+
+    db = request.app.state.db
+    await db.log_risk_event("STRATEGY_DISABLED", strategy_name, "", f"Manual override via API")
+
+    return {"strategy": strategy_name, "enabled": False, "override": True}
+
+
+@router.post("/strategies/reset")
+async def reset_strategy_override(request: Request, body: dict[str, Any]) -> dict:
+    """Clear manual override, revert to regime-based rules.
+
+    Body: {"strategy": "MOMENTUM"} or {"all": true}
+    """
+    selector: StrategySelector | None = getattr(request.app.state, "selector", None)
+    if selector is None:
+        return {"error": "Strategy selector not initialized"}
+
+    if body.get("all"):
+        selector.clear_all_overrides()
+        logger.info("[HotSwap] All strategy overrides cleared")
+        return {"cleared": "all"}
+
+    strategy_name = body.get("strategy", "").upper()
+    if not strategy_name:
+        return {"error": "Missing 'strategy' field"}
+
+    selector.clear_override(strategy_name)
+    logger.info("[HotSwap] Override cleared for %s", strategy_name)
+    return {"strategy": strategy_name, "override": None}
+
+
+@router.get("/strategies/status")
+async def get_strategies_status(request: Request) -> dict:
+    """Current strategy enable/disable status with regime info."""
+    selector: StrategySelector | None = getattr(request.app.state, "selector", None)
+    if selector is None:
+        return {"error": "Strategy selector not initialized"}
+
+    # Get current regime from the latest signal state
+    from bot.core.types import RegimeType
+    db = request.app.state.db
+    states = await db.get_signal_states()
+    current_regime = RegimeType.UNKNOWN
+    if states:
+        regime_str = states[0].get("regime", "UNKNOWN")
+        try:
+            current_regime = RegimeType(regime_str)
+        except ValueError:
+            pass
+
+    status = selector.get_status(current_regime)
+    return {
+        "regime": current_regime.value,
+        "strategies": status,
+    }

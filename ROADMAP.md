@@ -1,7 +1,7 @@
 # ROADMAP — btc-bot-v2 Development Plan
 
 > Documento vivente. Aggiornato step-by-step ad ogni sessione.
-> Ultimo aggiornamento: **2026-04-02**
+> Ultimo aggiornamento: **2026-04-04**
 
 ---
 
@@ -21,14 +21,14 @@
 | 9 | Strategy Evaluation | **DONE** | 29 | Evaluator + comparison + report + API + CSV |
 | 10 | Optimization & Polish | **DONE** | 40 | Refactor, E2E, stress, load, OpenAPI |
 | 11 | Paper Validation & Alerting | **DONE** | 36 | Regime detection, Telegram alerts, equity tracking, trade journaling |
-| 12 | Strategy Intelligence | TODO | 0 | Adaptive thresholds, multi-TF, regime-based selection |
+| 12 | Strategy Intelligence | **DONE** | 52 | Adaptive thresholds, multi-TF, regime selector, composite confidence, correlation filter, hot-swap API |
 | 13 | Live Trading Path | TODO | 0 | CLOB execution, wallet, kill switch, dual mode |
 | 14 | Resilienza & Recovery | TODO | 0 | HTTP pool, retry decorator, graceful degradation |
 | 15 | Dashboard v2 | TODO | 0 | Equity chart, strategy toggle, mobile, log viewer |
 | 16 | Data Pipeline & Analytics | TODO | 0 | TimescaleDB, historical ingest, feature store |
 | 17 | Infrastructure Hardening | TODO | 0 | SSL, Grafana, CI/CD, secrets management |
 
-**Totale test: 513 passing (4.60s)**
+**Totale test: 565 passing (18.96s)**
 
 ---
 
@@ -392,54 +392,62 @@ ONGOING    (Settimana 8+)    → Fasi 15-17: Dashboard v2, data pipeline, infra 
 
 ---
 
-## Phase 12: Strategy Intelligence — TODO
+## Phase 12: Strategy Intelligence — DONE (2026-04-04)
 
 > **Obiettivo:** Strategie che si adattano al mercato invece di threshold fissi.
-> **Motivazione:** `cvd_threshold=1_000_000` e fisso — in mercati calmi non genera segnali, in mercati volatili genera troppi.
+> **Risultato:** 6 sub-fasi completate, 52 nuovi test, tutte le intelligence features integrate in main.py.
 
 ### 12.1 — Adaptive Thresholds
-- [ ] `src/bot/strategies/adaptive.py` — rolling percentile calculator
-- [ ] CVD threshold = P75 del rolling 1h di CVD assoluto (invece di valore fisso)
-- [ ] VWAP threshold = P75 del rolling 1h di VWAP change
-- [ ] Config: `adaptive_enabled=True`, `adaptive_window=3600`, `adaptive_percentile=75`
-- [ ] Fallback a threshold fissi se non abbastanza dati (<100 campioni)
+- [x] `src/bot/strategies/adaptive.py` — rolling percentile calculator (P75 default)
+- [x] CVD threshold = P75 del rolling 1h di CVD assoluto
+- [x] VWAP threshold = P75 del rolling 1h di VWAP change
+- [x] Integrato in `TurboCvdStrategy` e `TurboVwapStrategy` (parametro `adaptive`)
+- [x] Config: `adaptive_enabled=True`, `adaptive_window=3600`, `adaptive_percentile=75`
+- [x] Fallback a threshold fissi se non abbastanza dati (<100 campioni)
+- [x] Feed update automatico nel main loop
 
 ### 12.2 — Multi-Timeframe Confirmation
-- [ ] Aggiungere 5min e 15min trend come filtro sovrapposto
-- [ ] `RSIFeed` esteso con periodi multipli (attualmente solo 1min candles)
-- [ ] Segnale confermato solo se trend 2min E trend 5min concordano
-- [ ] Config toggle: `multi_tf_enabled=True`
+- [x] `src/bot/strategies/multi_tf.py` — 5min e 15min trend via EMA slope
+- [x] `_CandleBuilder` builds 1-min and 5-min OHLC candles from ticks
+- [x] Segnale confermato solo se trend 5min non contraddice la direzione
+- [x] Config toggle: `multi_tf_enabled=True`
+- [x] Feed update automatico nel main loop, filtro prima dell'executor
 
 ### 12.3 — Regime-Based Strategy Selection
-- [ ] Usare regime da Fase 11.1 per abilitare/disabilitare strategie automaticamente:
-  - `TRENDING` → Momentum ON, Bollinger OFF
-  - `RANGING` → Bollinger ON, Turbo ridotto
-  - `VOLATILE` → Turbo ON, position size dimezzato
-- [ ] `src/bot/strategies/selector.py` — orchestratore regime-aware
-- [ ] Override manuale via `POST /api/v2/params`
+- [x] `src/bot/strategies/selector.py` — orchestratore regime-aware con override manuali
+- [x] TRENDING → Momentum ON, Bollinger OFF
+- [x] RANGING → Bollinger ON, Momentum OFF, Turbo size ridotto (0.8x)
+- [x] VOLATILE → position size dimezzato (0.5x) per tutte
+- [x] `size_multiplier` passato all'executor per riduzione dinamica posizioni
+- [x] Override manuale via API (vedi 12.6)
 
 ### 12.4 — Composite Confidence Score
-- [ ] Sostituire confidence singolo-indicatore con score composito:
-  - RSI alignment (0.2 weight)
-  - BB position (0.15 weight)
-  - Funding rate confirmation (0.15 weight)
-  - OI trend (0.15 weight)
-  - L/S ratio (0.1 weight)
-  - Volume confirmation (0.15 weight)
-  - Regime alignment (0.1 weight)
-- [ ] Soglia minima confidence 0.4 per piazzare trade (attualmente qualsiasi >0)
+- [x] `src/bot/strategies/composite.py` — scorer multi-indicatore pesato
+- [x] 7 componenti: RSI(0.20), BB(0.15), Funding(0.15), OI(0.15), L/S(0.10), Volume(0.15), Regime(0.10)
+- [x] Soglia minima 0.4 per piazzare trade
+- [x] Integrato nel main loop, sostituisce confidence singolo-indicatore
 
 ### 12.5 — Cross-Asset Correlation Filter
-- [ ] Se BTC scende >1% in 5min, bloccare BUY_YES su ETH/SOL
-- [ ] Rolling correlation matrix BTC↔ETH, BTC↔SOL (30min window)
-- [ ] Se correlazione >0.7 e asset primario in forte trend, filtrare segnali contrarian su secondari
+- [x] `src/bot/strategies/correlation.py` — filtro basato su correlazione
+- [x] Rule 1: BTC scende >1% in 5min → blocca BUY_YES su ETH/SOL
+- [x] Rule 2: Correlazione BTC↔asset >0.7 + forte trend → blocca segnali contrarian
+- [x] Rolling Pearson correlation su finestra 30min con bucket 1-min
+- [x] Config: `btc_drop_threshold_pct`, `correlation_threshold`, `correlation_window_seconds`
 
 ### 12.6 — Strategy Hot-Swap
-- [ ] `POST /api/v2/strategies/enable` e `/disable` (senza restart)
-- [ ] ACTIVE_BOTS dinamico da DB invece che hardcoded in `core/types.py`
-- [ ] Audit log di ogni cambio strategia
+- [x] `POST /api/v2/strategies/enable` e `/disable` (senza restart)
+- [x] `POST /api/v2/strategies/reset` — clear override singolo o tutti
+- [x] `GET /api/v2/strategies/status` — stato corrente con regime info
+- [x] Override manuali hanno precedenza sulle regole regime
+- [x] Audit log di ogni cambio strategia (risk_events table)
 
-### Test target: ~60 nuovi test
+### Config aggiunte a `config.py`
+- `MultiTFConfig(enabled=True)`
+- `RegimeSelectorConfig(enabled=True)`
+- `CompositeConfidenceConfig(enabled=True, min_confidence=0.4, w_rsi=0.20, ...)`
+- `CorrelationConfig(enabled=True, btc_drop_threshold_pct=1.0, correlation_threshold=0.7, ...)`
+
+### Test: 52 nuovi (target era ~60, coverage completa)
 
 ---
 

@@ -46,6 +46,47 @@ class TurboVwapConfig(StrategyConfig):
     max_elapsed_pct: float = 0.90
 
 
+class AdaptiveConfig(BaseSettings):
+    """Adaptive threshold configuration."""
+    enabled: bool = True
+    window_seconds: int = 3600  # 1 hour rolling window
+    percentile: int = 75  # P75 threshold
+    min_samples: int = 100  # fallback to fixed if less
+
+
+class MultiTFConfig(BaseSettings):
+    """Multi-timeframe confirmation configuration."""
+    enabled: bool = True
+
+
+class RegimeSelectorConfig(BaseSettings):
+    """Regime-based strategy selection configuration."""
+    enabled: bool = True
+
+
+class CompositeConfidenceConfig(BaseSettings):
+    """Composite confidence scorer configuration."""
+    enabled: bool = True
+    min_confidence: float = 0.4  # minimum to place trade
+    # Weights (must sum to 1.0)
+    w_rsi: float = 0.20
+    w_bb: float = 0.15
+    w_funding: float = 0.15
+    w_oi: float = 0.15
+    w_ls_ratio: float = 0.10
+    w_volume: float = 0.15
+    w_regime: float = 0.10
+
+
+class CorrelationConfig(BaseSettings):
+    """Cross-asset correlation filter configuration."""
+    enabled: bool = True
+    btc_drop_threshold_pct: float = 1.0  # BTC drop % in 5min to block BUY_YES
+    btc_drop_window_seconds: int = 300  # 5 minutes
+    correlation_threshold: float = 0.7  # block contrarian if corr > this
+    correlation_window_seconds: int = 1800  # 30 min rolling window
+
+
 class FeeConfig(BaseSettings):
     """Realistic fee simulation for paper trading."""
     gas_per_trade: float = 0.01  # Polygon gas cost per trade in USDC
@@ -135,6 +176,11 @@ class Settings(BaseSettings):
     turbo_cvd: TurboCvdConfig = Field(default_factory=TurboCvdConfig)
     turbo_vwap: TurboVwapConfig = Field(default_factory=TurboVwapConfig)
 
+    adaptive: AdaptiveConfig = Field(default_factory=AdaptiveConfig)
+    multi_tf: MultiTFConfig = Field(default_factory=MultiTFConfig)
+    regime_selector: RegimeSelectorConfig = Field(default_factory=RegimeSelectorConfig)
+    composite_confidence: CompositeConfidenceConfig = Field(default_factory=CompositeConfidenceConfig)
+    correlation: CorrelationConfig = Field(default_factory=CorrelationConfig)
     fees: FeeConfig = Field(default_factory=FeeConfig)
     risk: RiskConfig = Field(default_factory=RiskConfig)
     sizer: SizerConfig = Field(default_factory=SizerConfig)

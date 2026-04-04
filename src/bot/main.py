@@ -40,7 +40,10 @@ from bot.strategies import (
     TurboCvdStrategy,
     TurboVwapStrategy,
 )
+from bot.strategies.adaptive import AdaptiveThreshold
+from bot.strategies.multi_tf import MultiTimeframeTrend
 from bot.strategies.regime import classify as classify_regime
+from bot.strategies.selector import StrategySelector
 
 log = logging.getLogger(__name__)
 
@@ -74,8 +77,14 @@ async def run_bot(
     exchange_mgr: ExchangeManager | None = None,
     bus: EventBus | None = None,
     notifier: TelegramNotifier | None = None,
+    adaptive: AdaptiveThreshold | None = None,
+    multi_tf: MultiTimeframeTrend | None = None,
+    selector: StrategySelector | None = None,
+    correlation_filter=None,
+    composite_scorer=None,
 ) -> None:
     """Main loop for a single bot."""
+    import time as _time
     name = strategy.name
     cfg = strategy.cfg
     is_scaling = strategy.sizing_mode == "scaling"
@@ -99,6 +108,20 @@ async def run_bot(
             # Update RSI feed with latest price
             rsi_feed.update(asset, snapshot.last_price)
 
+            now = _time.time()
+
+            # Phase 12.1: Feed adaptive threshold calculator
+            if adaptive is not None and snapshot.last_price > 0:
+                adaptive.update(asset, snapshot.cvd_2min, snapshot.vwap_change)
+
+            # Phase 12.2: Feed multi-timeframe trend tracker
+            if multi_tf is not None and snapshot.last_price > 0:
+                multi_tf.update(asset, snapshot.last_price, now)
+
+            # Phase 12.5: Feed correlation filter
+            if correlation_filter is not None and snapshot.last_price > 0:
+                correlation_filter.update(asset, snapshot.last_price, now)
+
             # Build price buffer for regime detection
             if snapshot.last_price > 0:
                 _price_buf.append(snapshot.last_price)
@@ -109,10 +132,67 @@ async def run_bot(
             regime_result = classify_regime(_price_buf)
             regime_label = regime_result.regime.value
 
+            # Phase 12.3: Check if strategy is allowed in current regime
+            if selector is not None and settings.regime_selector.enabled:
+                if not selector.is_allowed(name, regime_result.regime):
+                    log.debug("[%s/%s] Blocked by regime selector (regime=%s)", name, asset, regime_label)
+                    await asyncio.sleep(strategy.signal_interval)
+                    continue
+
             rsi = rsi_feed.get_rsi(asset)
             bb = rsi_feed.get_bollinger(asset)
 
             result = strategy.evaluate(asset, snapshot, rsi, bb)
+
+            # Phase 12.4: Override confidence with composite score
+            if (
+                composite_scorer is not None
+                and settings.composite_confidence.enabled
+                and result.signal != Signal.SKIP
+            ):
+                composite = composite_scorer.score(
+                    snapshot=snapshot,
+                    rsi=rsi,
+                    bb=bb,
+                    regime=regime_result,
+                )
+                min_conf = settings.composite_confidence.min_confidence
+                if composite < min_conf:
+                    log.debug(
+                        "[%s/%s] Composite confidence %.3f < %.3f, skipping",
+                        name, asset, composite, min_conf,
+                    )
+                    result = strategy._result(Signal.SKIP, 0.0, asset, snapshot, result.indicators)
+                else:
+                    # Replace confidence with composite
+                    result = SignalResult(
+                        signal=result.signal,
+                        confidence=composite,
+                        strategy=result.strategy,
+                        asset=result.asset,
+                        snapshot=result.snapshot,
+                        indicators={**result.indicators, "composite_confidence": composite},
+                    )
+
+            # Phase 12.2: Multi-timeframe confirmation filter
+            if (
+                multi_tf is not None
+                and settings.multi_tf.enabled
+                and result.signal != Signal.SKIP
+            ):
+                if not multi_tf.is_confirmed(asset, result.signal.value):
+                    log.debug("[%s/%s] Blocked by multi-TF filter (signal=%s)", name, asset, result.signal.value)
+                    result = strategy._result(Signal.SKIP, 0.0, asset, snapshot, result.indicators)
+
+            # Phase 12.5: Cross-asset correlation filter
+            if (
+                correlation_filter is not None
+                and settings.correlation.enabled
+                and result.signal != Signal.SKIP
+            ):
+                if not correlation_filter.is_allowed(asset, result.signal.value):
+                    log.debug("[%s/%s] Blocked by correlation filter", name, asset)
+                    result = strategy._result(Signal.SKIP, 0.0, asset, snapshot, result.indicators)
 
             # Prometheus metrics
             SIGNALS_EVALUATED.labels(
@@ -154,10 +234,16 @@ async def run_bot(
                 })
 
             if result.signal != Signal.SKIP:
+                # Phase 12.3: Apply regime-based size multiplier
+                size_mult = 1.0
+                if selector is not None and settings.regime_selector.enabled:
+                    size_mult = selector.get_size_multiplier(name, regime_result.regime)
+
                 await executor.execute(
                     result,
                     strategy_cfg=cfg,
                     scaling=is_scaling,
+                    size_multiplier=size_mult,
                 )
 
         except Exception as e:
@@ -227,9 +313,10 @@ async def run_dashboard(
     db: Database,
     broker: WSBroker | None = None,
     exchange_mgr: ExchangeManager | None = None,
+    selector: StrategySelector | None = None,
 ) -> None:
     """Run FastAPI dashboard in the background."""
-    app = create_app(db, broker=broker, exchange_mgr=exchange_mgr)
+    app = create_app(db, broker=broker, exchange_mgr=exchange_mgr, selector=selector)
     config = uvicorn.Config(
         app, host="0.0.0.0", port=settings.dashboard_port,
         log_level="warning",
@@ -280,6 +367,28 @@ async def main() -> None:
     bus = EventBus()
     db = await create_database()
 
+    # Phase 12.1: Adaptive threshold calculator (shared across strategies)
+    adaptive_thresh = None
+    if settings.adaptive.enabled:
+        adaptive_thresh = AdaptiveThreshold(
+            window_seconds=settings.adaptive.window_seconds,
+            percentile=settings.adaptive.percentile,
+            min_samples=settings.adaptive.min_samples,
+        )
+        log.info("Adaptive thresholds enabled (P%d, %ds window)", settings.adaptive.percentile, settings.adaptive.window_seconds)
+
+    # Phase 12.2: Multi-timeframe trend tracker (shared)
+    multi_tf_tracker = None
+    if settings.multi_tf.enabled:
+        multi_tf_tracker = MultiTimeframeTrend()
+        log.info("Multi-timeframe confirmation enabled")
+
+    # Phase 12.3: Regime-based strategy selector (shared)
+    strat_selector = None
+    if settings.regime_selector.enabled:
+        strat_selector = StrategySelector()
+        log.info("Regime-based strategy selection enabled")
+
     # Build strategy instances
     bot_list = []
     active_pairs = []
@@ -290,7 +399,11 @@ async def main() -> None:
         if cfg is None:
             log.error("No config for %s", cls.__name__)
             continue
-        strategy = cls(cfg)
+        # Phase 12.1: Pass adaptive threshold to turbo strategies
+        if cls in (TurboCvdStrategy, TurboVwapStrategy) and adaptive_thresh is not None:
+            strategy = cls(cfg, adaptive=adaptive_thresh)
+        else:
+            strategy = cls(cfg)
         bot_list.append((strategy, asset))
         active_pairs.append((strategy.name, asset))
 
@@ -350,6 +463,20 @@ async def main() -> None:
         exchange_mgr.add_adapter(dex_adapter)
         log.info("Added DexScreener DEX aggregator")
 
+    # Phase 12.4: Composite confidence scorer
+    comp_scorer = None
+    if settings.composite_confidence.enabled:
+        from bot.strategies.composite import CompositeConfidenceScorer
+        comp_scorer = CompositeConfidenceScorer(settings.composite_confidence)
+        log.info("Composite confidence scoring enabled (min=%.2f)", settings.composite_confidence.min_confidence)
+
+    # Phase 12.5: Cross-asset correlation filter
+    corr_filter = None
+    if settings.correlation.enabled:
+        from bot.strategies.correlation import CrossAssetCorrelationFilter
+        corr_filter = CrossAssetCorrelationFilter(settings.correlation)
+        log.info("Cross-asset correlation filter enabled")
+
     # ── Banner ───────────────────────────────────────────
     n = len(bot_list)
     total = settings.initial_bankroll * n
@@ -383,10 +510,17 @@ async def main() -> None:
     await asyncio.sleep(FEED_WARMUP)
     log.info("Feeds ready. Exchanges: %d", exchange_mgr.exchange_count)
 
-    # 2. Bot tasks
+    # 2. Bot tasks (with Phase 12 intelligence components)
     for strategy, asset in bot_list:
         task = asyncio.create_task(
-            run_bot(strategy, asset, feed, rsi, executor, db, exchange_mgr, bus, tg),
+            run_bot(
+                strategy, asset, feed, rsi, executor, db, exchange_mgr, bus, tg,
+                adaptive=adaptive_thresh,
+                multi_tf=multi_tf_tracker,
+                selector=strat_selector,
+                correlation_filter=corr_filter,
+                composite_scorer=comp_scorer,
+            ),
             name=f"bot_{strategy.name}_{asset}",
         )
         tasks.append(task)
@@ -404,9 +538,9 @@ async def main() -> None:
     # 4c. Equity snapshot recorder (every 5min)
     tasks.append(asyncio.create_task(equity_snapshot_task(db), name="equity_snap"))
 
-    # 5. Dashboard (with WebSocket broker + exchange health)
+    # 5. Dashboard (with WebSocket broker + exchange health + strategy selector)
     tasks.append(asyncio.create_task(
-        run_dashboard(db, broker, exchange_mgr), name="dashboard",
+        run_dashboard(db, broker, exchange_mgr, selector=strat_selector), name="dashboard",
     ))
 
     print(f"\n[Bot] {n} bot attivi. Dashboard: http://localhost:{settings.dashboard_port}\n")
