@@ -110,7 +110,7 @@ class BinanceFeed:
         return s["connected"] and (time.time() - s["last_update"] < 30)
 
     async def run(self) -> None:
-        """Run WS + REST poller concurrently. Blocks until max retries hit."""
+        """Run WS + REST poller concurrently.  Runs forever — never gives up."""
         await asyncio.gather(self._ws_loop(), self._rest_poll())
 
     # ------------------------------------------------------------------
@@ -118,16 +118,26 @@ class BinanceFeed:
     # ------------------------------------------------------------------
 
     async def _ws_loop(self) -> None:
-        retries, backoff = 0, 1.0
-        while retries < self._max_retries:
+        """Phase 14: infinite retry loop — never dies after max_retries.
+
+        Backoff caps at 60 s and resets to 1 s on a successful connection.
+        """
+        attempt, backoff = 0, 1.0
+        while True:
             try:
                 async with websockets.connect(
                     WS_URL, ping_interval=20, ping_timeout=10
                 ) as ws:
                     for s in self._state.values():
                         s["connected"] = True
-                    retries, backoff = 0, 1.0
-                    logger.info("[BinanceFeed] Connected (BTC+ETH+SOL)")
+                    if attempt > 0:
+                        logger.info(
+                            "[BinanceFeed] Reconnected after %d attempt(s) (BTC+ETH+SOL)",
+                            attempt,
+                        )
+                    else:
+                        logger.info("[BinanceFeed] Connected (BTC+ETH+SOL)")
+                    attempt, backoff = 0, 1.0  # reset on success
 
                     async for raw in ws:
                         msg = json.loads(raw)
@@ -150,15 +160,13 @@ class BinanceFeed:
             except Exception as e:
                 for s in self._state.values():
                     s["connected"] = False
-                retries += 1
+                attempt += 1
                 logger.warning(
-                    "[BinanceFeed] Error (retry %d/%d): %s",
-                    retries, self._max_retries, e,
+                    "[BinanceFeed] Disconnected (attempt %d): %s — retrying in %.0fs",
+                    attempt, e, backoff,
                 )
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 60)
-
-        logger.error("[BinanceFeed] Max retries (%d) reached.", self._max_retries)
 
     # ------------------------------------------------------------------
     # REST polling

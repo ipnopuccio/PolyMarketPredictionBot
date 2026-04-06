@@ -1,17 +1,23 @@
 """Trade resolver -- async loop that checks for resolved markets.
 
 Polls Gamma API every 30 seconds, resolves open trades, updates bankroll.
+
+Phase 14: Uses a single shared httpx.AsyncClient for the lifetime of the
+resolver loop (no connection-per-fetch leak).  Stale trades (open > 6 h)
+are moved to the dead-letter queue automatically.
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
+import time
 
 import httpx
 
 from bot.config import settings
 from bot.core.events import EventBus
+from bot.core.retry import with_retry
 from bot.monitoring.metrics import (
     PNL_PER_TRADE,
     PNL_TOTAL,
@@ -24,6 +30,7 @@ from bot.storage.database import Database
 logger = logging.getLogger(__name__)
 
 GAMMA_API = "https://gamma-api.polymarket.com"
+DEAD_LETTER_AFTER_HOURS = 6  # move to DLQ after this many hours unresolved
 
 
 class Resolver:
@@ -32,19 +39,32 @@ class Resolver:
     def __init__(self, db: Database, bus: EventBus) -> None:
         self._db = db
         self._bus = bus
+        # Shared HTTP client — created in run(), None otherwise
+        self._client: httpx.AsyncClient | None = None
 
     # ── Public API ──────────────────────────────────────────
 
     async def run(self) -> None:
-        """Start the resolver loop (runs forever)."""
+        """Start the resolver loop (runs forever).
+
+        A single httpx.AsyncClient is kept alive for the duration of the loop,
+        reusing TCP connections instead of creating one per request.
+        """
         logger.info("Resolver started -- checking every 30s")
-        while True:
+        limits = httpx.Limits(max_connections=10, max_keepalive_connections=5)
+        async with httpx.AsyncClient(timeout=10, limits=limits) as client:
+            self._client = client
             try:
-                RESOLVER_CYCLES.inc()
-                await self._resolve_cycle()
-            except Exception as exc:
-                logger.error("Resolver cycle error: %s", exc, exc_info=True)
-            await asyncio.sleep(30)
+                while True:
+                    try:
+                        RESOLVER_CYCLES.inc()
+                        await self._resolve_cycle()
+                        await self._dlq_cycle()
+                    except Exception as exc:
+                        logger.error("Resolver cycle error: %s", exc, exc_info=True)
+                    await asyncio.sleep(30)
+            finally:
+                self._client = None
 
     # ── Internals ───────────────────────────────────────────
 
@@ -113,6 +133,33 @@ class Resolver:
         if resolved_any:
             await self._publish_metrics()
 
+    async def _dlq_cycle(self) -> None:
+        """Move trades that have been open for too long to the dead-letter queue."""
+        try:
+            stale = await self._db.get_stale_open_trades(
+                older_than_hours=DEAD_LETTER_AFTER_HOURS
+            )
+            for trade in stale:
+                await self._db.move_to_dead_letter(
+                    trade["id"],
+                    reason=f"Unresolved after {DEAD_LETTER_AFTER_HOURS}h",
+                )
+                logger.warning(
+                    "[DLQ] Trade #%d (%s/%s) moved to dead-letter queue "
+                    "(open > %dh)",
+                    trade["id"], trade["strategy"], trade["asset"],
+                    DEAD_LETTER_AFTER_HOURS,
+                )
+                await self._bus.publish("trade.dead_letter", {
+                    "trade_id": trade["id"],
+                    "strategy": trade["strategy"],
+                    "asset": trade["asset"],
+                    "market_id": trade.get("market_id"),
+                    "reason": f"Unresolved after {DEAD_LETTER_AFTER_HOURS}h",
+                })
+        except Exception as exc:
+            logger.debug("DLQ cycle error: %s", exc)
+
     async def _publish_metrics(self) -> None:
         """Publish aggregated portfolio metrics to the metrics WS channel."""
         try:
@@ -135,12 +182,19 @@ class Resolver:
         except Exception as e:
             logger.debug("Failed to publish metrics: %s", e)
 
+    @with_retry(max_attempts=3, base_delay=1.0)
+    async def _fetch_market_with_retry(self, market_id: str) -> dict:
+        """Fetch a single market from Gamma API (retriable)."""
+        assert self._client is not None
+        resp = await self._client.get(f"{GAMMA_API}/markets/{market_id}")
+        resp.raise_for_status()
+        return resp.json()
+
     async def _fetch_market(self, market_id: str) -> dict | None:
+        if self._client is None:
+            return None
         try:
-            async with httpx.AsyncClient(timeout=10) as client:
-                resp = await client.get(f"{GAMMA_API}/markets/{market_id}")
-                resp.raise_for_status()
-                return resp.json()
+            return await self._fetch_market_with_retry(market_id)
         except Exception as exc:
             logger.warning("Failed to fetch market %s: %s", market_id, exc)
             return None

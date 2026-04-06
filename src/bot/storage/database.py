@@ -130,6 +130,23 @@ class Database:
 
             CREATE INDEX IF NOT EXISTS idx_equity_ts
                 ON equity_snapshots(strategy, asset, timestamp);
+
+            -- Phase 14: Dead-letter queue for trades unresolved after 6h
+            CREATE TABLE IF NOT EXISTS dead_letter_trades (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                original_trade_id INTEGER NOT NULL,
+                timestamp TEXT NOT NULL,
+                strategy TEXT NOT NULL,
+                asset TEXT NOT NULL,
+                market_id TEXT,
+                signal TEXT NOT NULL,
+                entry_price REAL NOT NULL,
+                bet_size REAL NOT NULL,
+                reason TEXT NOT NULL,
+                resolved_outcome TEXT,
+                resolved_at TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
         """)
         await self.conn.commit()
 
@@ -509,3 +526,60 @@ class Database:
             for row in await cur.fetchall():
                 result[row["signal"]] = row["n"]
         return result
+
+    # ─── Dead Letter Queue (Phase 14) ───────────────────────
+
+    async def get_stale_open_trades(self, older_than_hours: float = 6.0) -> list[dict]:
+        """Return open trades that have been unresolved for > older_than_hours."""
+        import time
+        cutoff = datetime.fromtimestamp(
+            time.time() - older_than_hours * 3600, tz=timezone.utc
+        ).isoformat()
+        async with self.conn.execute(
+            "SELECT * FROM trades WHERE outcome IS NULL AND timestamp < ?",
+            (cutoff,),
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+    async def move_to_dead_letter(self, trade_id: int, reason: str) -> None:
+        """Copy a trade to dead_letter_trades and mark it resolved as VOID."""
+        trade = await (await self.conn.execute(
+            "SELECT * FROM trades WHERE id=?", (trade_id,)
+        )).fetchone()
+        if not trade:
+            return
+
+        await self.conn.execute(
+            """INSERT OR IGNORE INTO dead_letter_trades
+               (original_trade_id, timestamp, strategy, asset, market_id,
+                signal, entry_price, bet_size, reason)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
+            (
+                trade_id, trade["timestamp"], trade["strategy"], trade["asset"],
+                trade["market_id"], trade["signal"], trade["entry_price"],
+                trade["bet_size"], reason,
+            ),
+        )
+        # Mark the original trade as VOID so it doesn't remain "open"
+        await self.conn.execute(
+            "UPDATE trades SET outcome='VOID', pnl=0.0 WHERE id=?",
+            (trade_id,),
+        )
+        await self.conn.commit()
+
+    async def get_dead_letter_trades(self, limit: int = 100) -> list[dict]:
+        """Return dead-letter queue entries, newest first."""
+        async with self.conn.execute(
+            "SELECT * FROM dead_letter_trades ORDER BY id DESC LIMIT ?", (limit,)
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+    async def resolve_dead_letter(
+        self, dlq_id: int, outcome: str
+    ) -> None:
+        """Manually resolve a dead-letter trade (outcome: WIN / LOSS / VOID)."""
+        await self.conn.execute(
+            "UPDATE dead_letter_trades SET resolved_outcome=?, resolved_at=? WHERE id=?",
+            (outcome, self._now(), dlq_id),
+        )
+        await self.conn.commit()

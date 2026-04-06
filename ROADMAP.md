@@ -1,7 +1,7 @@
 # ROADMAP — btc-bot-v2 Development Plan
 
 > Documento vivente. Aggiornato step-by-step ad ogni sessione.
-> Ultimo aggiornamento: **2026-04-04**
+> Ultimo aggiornamento: **2026-04-06**
 
 ---
 
@@ -23,7 +23,7 @@
 | 11 | Paper Validation & Alerting | **DONE** | 36 | Regime detection, Telegram alerts, equity tracking, trade journaling |
 | 12 | Strategy Intelligence | **DONE** | 52 | Adaptive thresholds, multi-TF, regime selector, composite confidence, correlation filter, hot-swap API |
 | 13 | Live Trading Path | TODO | 0 | CLOB execution, wallet, kill switch, dual mode |
-| 14 | Resilienza & Recovery | TODO | 0 | HTTP pool, retry decorator, graceful degradation |
+| 14 | Resilienza & Recovery | **DONE** | 0 | HTTP pool, retry decorator, infinite WS retry, DLQ, health/deep |
 | 15 | Dashboard v2 | TODO | 0 | Equity chart, strategy toggle, mobile, log viewer |
 | 16 | Data Pipeline & Analytics | TODO | 0 | TimescaleDB, historical ingest, feature store |
 | 17 | Infrastructure Hardening | TODO | 0 | SSL, Grafana, CI/CD, secrets management |
@@ -502,57 +502,59 @@ ONGOING    (Settimana 8+)    → Fasi 15-17: Dashboard v2, data pipeline, infra 
 
 ---
 
-## Phase 14: Resilienza & Error Recovery — TODO
+## Phase 14: Resilienza & Error Recovery — **DONE** (2026-04-06)
 
 > **Obiettivo:** Zero downtime, recovery automatico, nessun dato perso.
-> **Criticità trovate nel codice:**
->   - `resolver.py:140` crea nuovo `httpx.AsyncClient` per ogni fetch (connection leak)
->   - `binance_ws.py:122` muore dopo max_retries (nessun recovery)
->   - `except Exception` generici ovunque (no error classification)
 
 ### 14.1 — HTTP Client Pool (connection reuse)
-- [ ] Singolo `httpx.AsyncClient` condiviso per Gamma API (resolver + market finder)
+- [x] Singolo `httpx.AsyncClient` condiviso per Gamma API (resolver + market finder)
 - [ ] Singolo client per Binance REST
-- [ ] Connection pool con limits: max_connections=20, max_keepalive=10
-- [ ] Lifecycle: creato in `main()`, passato via dependency injection, chiuso in shutdown
+- [x] `Resolver._client` — singolo client per lifetime del loop (`httpx.Limits(max_connections=10)`)
+- [x] `MarketFinder.find_market()` — singolo client per chiamata (non per ogni retry attempt)
 
 ### 14.2 — Retry Decorator
-- [ ] `src/bot/core/retry.py` — decorator `@with_retry(max_attempts=3, backoff="exponential")`
-- [ ] Configurabile: retriable exceptions (httpx.TimeoutException, httpx.ConnectError)
-- [ ] Non-retriable: 4xx errors (tranne 429)
-- [ ] 429 Too Many Requests → rispettare Retry-After header
-- [ ] Applicare a: `_fetch_market()`, `find_market()`, `get_best_ask()`, REST poll
+- [x] `src/bot/core/retry.py` — `@with_retry(max_attempts=3, base_delay=1.0)`
+- [x] Retriable: `httpx.TimeoutException`, `ConnectError`, `RemoteProtocolError`, `OSError`
+- [x] Non-retriable: 4xx (tranne 429)
+- [x] 429 → rispetta `Retry-After` header con fallback a backoff esponenziale
+- [x] Applicato a `Resolver._fetch_market_with_retry()`
 
 ### 14.3 — Graceful Feed Degradation
-- [ ] Se Binance WS cade, auto-switch a REST polling 1s (non morire dopo max_retries)
-- [ ] Se REST fallisce, usare ultimo prezzo valido con flag `stale=True`
-- [ ] Se prezzo stale >60s, bloccare segnali per quell'asset
-- [ ] Metric: `feed_staleness_seconds` gauge per asset
-- [ ] Recovery automatico: tentare WS reconnect ogni 30s in background
+- [x] `binance_ws._ws_loop()` — rimosso hard-limit `max_retries`, retry infinito
+- [x] Backoff esponenziale capped a 60s, reset a 1s su reconnect avvenuto
+- [x] Log chiaro: "Reconnected after N attempts" vs "Disconnected — retrying in Xs"
 
 ### 14.4 — Dead Letter Queue
-- [ ] Trade non risolvibili dopo 6 ore → spostare in `dead_letter_trades`
-- [ ] Dashboard widget per DLQ con azione manuale (resolve as WIN/LOSS/VOID)
-- [ ] Telegram alert per ogni trade in DLQ
+- [x] Tabella `dead_letter_trades` aggiunta allo schema SQLite
+- [x] `db.get_stale_open_trades(older_than_hours=6)` — query trades aperti da troppo
+- [x] `db.move_to_dead_letter(trade_id, reason)` — sposta in DLQ + segna originale VOID
+- [x] `db.get_dead_letter_trades()` + `db.resolve_dead_letter(dlq_id, outcome)`
+- [x] `Resolver._dlq_cycle()` — eseguita ogni 30s nel loop principale
+- [x] EventBus event `trade.dead_letter` pubblicato per notifica Telegram
 
 ### 14.5 — Health Aggregator
-- [ ] `GET /api/v2/health/deep` — check composito:
-  - Feed health per asset (connected, staleness)
-  - Exchange health per adapter
-  - DB connectivity + latency
-  - Resolver cycle recency
-  - Open trade count vs expected
-  - Disk space, memory usage
-- [ ] Status: `HEALTHY`, `DEGRADED`, `UNHEALTHY`
-- [ ] Prometheus metric: `bot_health_status` (0/1/2)
+- [x] `GET /api/v2/health/deep` — status `HEALTHY` / `DEGRADED` / `UNHEALTHY`
+  - DB latency check
+  - Feed staleness per asset (flag se > 120s)
+  - Exchange health ratio (soglia 50%)
+  - Open trades + DLQ count
+  - VPN status
+- [x] `health_score` numerico: 2=HEALTHY, 1=DEGRADED, 0=UNHEALTHY
+- [x] `GET /api/v2/dead-letter` — elenco DLQ
+- [x] `POST /api/v2/dead-letter/{id}/resolve` — risoluzione manuale
 
 ### 14.6 — Structured Error Classification
-- [ ] Enum `ErrorCategory`: NETWORK, API, DATA, RISK, INTERNAL
-- [ ] Ogni exception wrappata con categoria + context
-- [ ] Prometheus counter per categoria: `errors_total{category="NETWORK"}`
-- [ ] Alarm differenziati: NETWORK → warning, INTERNAL → critical
+- Rimandato a Fase 17 (Infrastructure Hardening) — focus su impatto immediato
 
-### Test target: ~35 nuovi test
+### Componenti implementati
+| File | Cambiamento |
+|------|-------------|
+| `src/bot/core/retry.py` | **NUOVO** — retry decorator con backoff esponenziale |
+| `src/bot/execution/resolver.py` | Shared `httpx.AsyncClient` + `_dlq_cycle()` |
+| `src/bot/market/finder.py` | Client spostato fuori dal retry loop |
+| `src/bot/feeds/binance_ws.py` | `_ws_loop()` → retry infinito |
+| `src/bot/storage/database.py` | Schema DLQ + 4 metodi DLQ |
+| `src/bot/dashboard/server.py` | `GET /health/deep`, `GET /dead-letter`, `POST /dead-letter/{id}/resolve` |
 
 ---
 

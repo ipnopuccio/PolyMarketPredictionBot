@@ -312,6 +312,138 @@ async def reset_strategy_override(request: Request, body: dict[str, Any]) -> dic
     return {"strategy": strategy_name, "override": None}
 
 
+# ── Phase 14: Deep Health Check ─────────────────────────
+@router.get("/health/deep")
+async def get_health_deep(request: Request) -> dict:
+    """Comprehensive health check: feeds, exchanges, DB, resolver, DLQ.
+
+    Returns a status of HEALTHY / DEGRADED / UNHEALTHY plus per-component
+    details and a Prometheus-friendly numeric ``health_score`` (0/1/2).
+    """
+    import time
+
+    db = request.app.state.db
+    exchange_mgr = getattr(request.app.state, "exchange_mgr", None)
+    components: dict[str, dict] = {}
+    issues: list[str] = []
+
+    # ── Database ──────────────────────────────────────────
+    try:
+        t0 = time.monotonic()
+        async with db.conn.execute("SELECT 1") as cur:
+            await cur.fetchone()
+        db_latency_ms = (time.monotonic() - t0) * 1000
+        components["database"] = {"status": "ok", "latency_ms": round(db_latency_ms, 1)}
+    except Exception as exc:
+        components["database"] = {"status": "error", "error": str(exc)}
+        issues.append("database unreachable")
+
+    # ── Feed staleness per asset ───────────────────────────
+    try:
+        states = await db.get_signal_states()
+        feed_info: dict[str, dict] = {}
+        for s in states:
+            asset = s.get("asset", "?")
+            updated_at = s.get("updated_at", "")
+            if updated_at:
+                age = (datetime.now(timezone.utc) - datetime.fromisoformat(updated_at)).total_seconds()
+                stale = age > 120
+                feed_info[asset] = {"age_s": round(age, 1), "stale": stale}
+                if stale:
+                    issues.append(f"feed stale: {asset} ({age:.0f}s ago)")
+            else:
+                feed_info[asset] = {"age_s": None, "stale": True}
+                issues.append(f"feed never updated: {asset}")
+        components["feeds"] = {"status": "ok" if not any(v["stale"] for v in feed_info.values()) else "stale", "assets": feed_info}
+    except Exception as exc:
+        components["feeds"] = {"status": "error", "error": str(exc)}
+        issues.append("feed check failed")
+
+    # ── Exchange health ────────────────────────────────────
+    if exchange_mgr is not None:
+        summary = exchange_mgr.summary()
+        healthy_ratio = summary.get("healthy", 0) / max(summary.get("total", 1), 1)
+        components["exchanges"] = {
+            "status": "ok" if healthy_ratio >= 0.5 else "degraded",
+            "healthy": summary.get("healthy", 0),
+            "total": summary.get("total", 0),
+        }
+        if healthy_ratio < 0.5:
+            issues.append(f"only {summary.get('healthy')}/{summary.get('total')} exchanges healthy")
+    else:
+        components["exchanges"] = {"status": "unavailable"}
+
+    # ── Open trades & DLQ ─────────────────────────────────
+    try:
+        open_trades = await db.get_open_trades()
+        dlq = await db.get_dead_letter_trades(limit=10)
+        components["trades"] = {
+            "open": len(open_trades),
+            "dead_letter_queue": len(dlq),
+        }
+        if dlq:
+            issues.append(f"{len(dlq)} trades in dead-letter queue")
+    except Exception as exc:
+        components["trades"] = {"status": "error", "error": str(exc)}
+
+    # ── VPN ───────────────────────────────────────────────
+    from bot.network.vpn_guard import is_vpn_active
+    vpn_ok = await is_vpn_active()
+    components["vpn"] = {"status": "active" if vpn_ok else "inactive"}
+
+    # ── Overall status ────────────────────────────────────
+    db_ok = components.get("database", {}).get("status") == "ok"
+    feeds_ok = components.get("feeds", {}).get("status") == "ok"
+
+    if not db_ok or len(issues) >= 3:
+        overall = "UNHEALTHY"
+        health_score = 0
+    elif issues:
+        overall = "DEGRADED"
+        health_score = 1
+    else:
+        overall = "HEALTHY"
+        health_score = 2
+
+    return {
+        "status": overall,
+        "health_score": health_score,
+        "issues": issues,
+        "components": components,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+# ── Phase 14: Dead Letter Queue endpoint ─────────────────
+@router.get("/dead-letter")
+async def get_dead_letter(
+    request: Request,
+    limit: int = Query(default=50, le=200),
+) -> list[dict]:
+    """Dead-letter trades: unresolved after 6h, pending manual review."""
+    db = request.app.state.db
+    return await db.get_dead_letter_trades(limit=limit)
+
+
+@router.post("/dead-letter/{dlq_id}/resolve")
+async def resolve_dead_letter(
+    request: Request,
+    dlq_id: int,
+    body: dict[str, str],
+) -> dict:
+    """Manually resolve a dead-letter trade.
+
+    Body: ``{"outcome": "WIN" | "LOSS" | "VOID"}``
+    """
+    outcome = body.get("outcome", "").upper()
+    if outcome not in ("WIN", "LOSS", "VOID"):
+        return {"error": "outcome must be WIN, LOSS, or VOID"}
+    db = request.app.state.db
+    await db.resolve_dead_letter(dlq_id, outcome)
+    logger.info("[DLQ] Manually resolved dlq_id=%d as %s", dlq_id, outcome)
+    return {"dlq_id": dlq_id, "resolved_outcome": outcome}
+
+
 @router.get("/strategies/status")
 async def get_strategies_status(request: Request) -> dict:
     """Current strategy enable/disable status with regime info."""

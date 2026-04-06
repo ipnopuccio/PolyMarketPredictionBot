@@ -81,9 +81,10 @@ class MarketFinder:
         prefix = series["prefix"]
         interval = series["interval"]
 
-        for attempt in range(retries):
-            try:
-                async with httpx.AsyncClient(timeout=10) as client:
+        # Phase 14: one shared client for all retry attempts (not one per attempt)
+        async with httpx.AsyncClient(timeout=10) as client:
+            for attempt in range(retries):
+                try:
                     for delta in (0, interval, -interval):
                         candidate_ts = ts + delta
                         slug = f"{prefix}-{candidate_ts}"
@@ -141,13 +142,13 @@ class MarketFinder:
                         )
                         return info
 
-            except Exception as exc:
-                wait = 2 ** attempt
-                logger.warning(
-                    "%s lookup failed (attempt %d): %s", asset, attempt + 1, exc,
-                )
-                if attempt < retries - 1:
-                    await asyncio.sleep(wait)
+                except Exception as exc:
+                    wait = 2 ** attempt
+                    logger.warning(
+                        "%s lookup failed (attempt %d): %s", asset, attempt + 1, exc,
+                    )
+                    if attempt < retries - 1:
+                        await asyncio.sleep(wait)
 
         logger.info("No active Up/Down market found for %s", asset)
         return None
